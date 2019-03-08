@@ -1,0 +1,172 @@
+/*
+Copyright (C), 1995-2005, Si-Tech Information Technology Ltd. 
+file_name:	database.pc
+author:		caoshun
+version:	1.01
+date:		2005-03-04
+description:
+			Oracle数据库操作基本函数-代码文件
+others:
+history:
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+EXEC SQL INCLUDE sqlca;
+EXEC SQL INCLUDE oraca;
+EXEC ORACLE OPTION (ORACA=YES);
+
+#include "database.h"
+
+#ifdef DEBUG
+#define AUTOCALL_DEBUG printf("FuncCalss database:%s,%d,error!\n", __FILE__, __LINE__);
+#else
+#define AUTOCALL_DEBUG ;
+#endif
+
+/* 格式化数据库错误信息 */
+#define DB_SQLERR_SPRINTF {*(sqlca.sqlerrm.sqlerrmc+sqlca.sqlerrm.sqlerrml-1) = '\0'; sprintf(g_DB_ErrMsg, "DB:ERR:num[%d],msg[%s]", sqlca.sqlcode, sqlca.sqlerrm.sqlerrmc);}
+
+/* 外部全局变量引用 */
+extern struct stErrLog g_RunLog;
+
+/*本地静态变量*/
+static char g_DB_ErrMsg[1024+1];
+
+/*
+function:   DB_OpenDB()
+description:
+            打开Oracle Database
+Input:      
+            obj:自定义数据库结构体
+Output:
+Return:     0:成功，other:不成功
+others: 
+*/
+int DB_OpenDB(struct stDB_DBInfo *pstObj)
+{
+
+	if(pstObj->multi_mode == 1)
+	{
+		EXEC SQL CONNECT :pstObj->username IDENTIFIED BY :pstObj->password AT :pstObj->server_id USING :pstObj->server;
+	}
+	else
+	{
+		EXEC SQL CONNECT :pstObj->username IDENTIFIED BY :pstObj->password USING :pstObj->server;
+	}
+	
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		AUTOCALL_DEBUG;
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+function:   DB_CloseDB()
+description:
+            关闭Oracle Database
+Input:      
+            obj:自定义数据库结构体
+Output:
+Return:     0:成功，other:不成功
+others: 
+*/
+int DB_CloseDB(struct stDB_DBInfo *pstObj)
+{
+	if(pstObj->multi_mode == 1)
+	{
+		EXEC SQL AT :pstObj->server_id COMMIT WORK RELEASE;
+	}
+	else
+	{
+		EXEC SQL COMMIT WORK RELEASE;
+	}
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		AUTOCALL_DEBUG;
+		return -1;
+	}
+
+	return 0;	
+}
+
+/*
+function:   DB_CommitWork()
+description:
+            关闭Oracle Database
+Input:      
+            obj:自定义数据库结构体
+Output:
+Return:     0:成功，other:不成功
+others: 
+*/
+int DB_CommitWork(struct stDB_DBInfo *pstObj)
+{
+	if(pstObj->multi_mode == 1)
+	{
+		EXEC SQL AT :pstObj->server_id COMMIT WORK;
+	}
+	else
+	{
+		EXEC SQL COMMIT WORK;
+	}
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		AUTOCALL_DEBUG;
+		return -1;
+	}
+
+	return 0;		
+}
+
+/*
+function:   DB_AbortWork()
+description:
+            关闭Oracle Database
+Input:      
+            obj:自定义数据库结构体
+Output:
+Return:     0:成功，other:不成功
+others: 
+*/
+int DB_AbortWork(struct stDB_DBInfo *pstObj)
+{
+	if(pstObj->multi_mode == 1)
+	{
+		EXEC SQL AT :pstObj->server_id ROLLBACK WORK;
+	}
+	else
+	{
+		EXEC SQL ROLLBACK WORK;
+	}
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		AUTOCALL_DEBUG;
+		return -1;
+	}
+
+	return 0;		
+}
+
+/*
+function:   DB_GetErrMsg()
+description:
+			返回Oracle错误信息
+Input:      
+Output:
+Return:     Oracle错误信息
+others: 
+*/
+char *DB_GetErrMsg(void)
+{
+	return g_DB_ErrMsg;
+}

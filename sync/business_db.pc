@@ -1,0 +1,434 @@
+/*
+Copyright (C), 1995-2005, Si-Tech Information Technology Ltd. 
+file_name:	business_db.pc
+author:		caoshun
+version:	1.00
+date:		2005-05-10
+description:
+			数据库操作函数
+others:
+history:
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+EXEC SQL INCLUDE sqlca;
+EXEC SQL INCLUDE oraca;
+EXEC ORACLE OPTION (ORACA=YES);
+
+#include "billing_sync.h"
+
+#include "mydefine.h"
+#include "CookieFunc.h"
+#include "ErrLog.h"
+#include "function.h"
+#include "database.h"
+#include "business.h"
+#include "business_db.h"
+
+/*外部全局变量引用*/
+/* 系统数据 */
+extern struct stApp_Data g_AppData;
+/* 命令行参数 */
+extern struct stApp_Argv g_AppArgv;
+/* 日志对象 */
+extern struct stErrLog g_RunLog;
+extern struct stErrLog g_DataLog;
+/* Billing数据库 */
+extern struct stDB_DBInfo g_SrcDB;
+/* Clear数据库 */
+extern struct stDB_DBInfo g_TagDB;
+
+/* 格式化数据库错误信息 */
+#define DB_SQLERR_SPRINTF {*(sqlca.sqlerrm.sqlerrmc+sqlca.sqlerrm.sqlerrml-1) = '\0'; sprintf(g_RunLog.LogBuffer, "DB:ERR:num[%d],msg[%s]", sqlca.sqlcode, sqlca.sqlerrm.sqlerrmc);}
+
+/*
+function:   busi_db_IMSI()
+description:
+		处理IMSI记录
+Input:      
+Output:
+		0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_IMSI(void)
+{
+	int iRcode;
+	int iLoopCount, iErrorCount, iSuccessCount;
+	char chSqlBuffer[4096+1];
+	char chInsertSql[4096+1];
+	char chUpdateSql[4096+1];
+
+	char msisdn[64+1];
+	char imsi_no[64+1];
+	char begin_date[64+1];
+	char end_date[64+1];
+	char flag[64+1];
+
+	/* 生成查询SQL语句 */
+	MEMSET(chSqlBuffer);
+
+	sprintf
+	(
+		chSqlBuffer, 
+		"SELECT imsi_no, phone_no, to_char(begin_time,'YYYYMMDDHH24MISS'), to_char(end_time,'YYYYMMDDHH24MISS'), flag FROM wPhoneImsiChg ORDER BY deal_time, begin_time, flag FOR UPDATE"
+	);
+
+#ifdef DEBUG
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+#endif	
+
+	/* 生成查询游标 */
+	EXEC SQL AT :g_SrcDB.server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :g_SrcDB.server_id DECLARE ora_cur_obj CURSOR FOR ora_pre;
+	EXEC SQL AT :g_SrcDB.server_id OPEN ora_cur_obj;
+	g_SrcDB.sqlcode = SQLCODE;
+	
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+
+	iLoopCount = 0;
+	iErrorCount = 0;
+	iSuccessCount= 0;
+	
+	/* 处理所有的数据记录 */
+	for(;;)
+	{
+		EXEC SQL AT :g_SrcDB.server_id
+		FETCH
+			ora_cur_obj
+		INTO
+			:imsi_no,		
+			:msisdn,
+			:begin_date,			
+			:end_date,
+			:flag
+		;
+		g_SrcDB.sqlcode = SQLCODE;
+
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :g_SrcDB.server_id CLOSE ora_cur_obj;
+				EXEC SQL AT :g_SrcDB.server_id ROLLBACK WORK;
+				EXEC SQL AT :g_TagDB.server_id ROLLBACK WORK;
+				return -1;
+			}
+		}
+
+		cf_string_trim(imsi_no);
+		cf_string_trim(msisdn);
+		cf_string_trim(begin_date);
+		cf_string_trim(end_date);
+		cf_string_trim(flag);	
+
+		iLoopCount++;
+
+		/*合法性验证*/
+		iRcode = busi_check_msisdn(msisdn) || busi_check_imsi(imsi_no) || (flag[0] != '1' && flag[0] != '2');
+		if(iRcode)
+		{
+			iErrorCount++;
+
+			/*写日志*/
+			sprintf(g_DataLog.LogBuffer, "invalid record:%s,%s,%s,%s,%s", imsi_no, msisdn, begin_date, end_date, flag);
+			busi_write_datalog(g_DataLog.LogBuffer);
+		}
+		else
+		{
+			iSuccessCount++;
+
+			MEMSET(chInsertSql);
+			MEMSET(chUpdateSql);
+
+			sprintf(
+				chInsertSql,
+				"INSERT INTO msisdn_imsi_info values(:v1, :v2, to_date(:v3,'YYYYMMDDHH24MISS'), to_date(:v4,'YYYYMMDDHH24MISS'))"
+			);
+
+			sprintf(
+				chUpdateSql,
+				"UPDATE msisdn_imsi_info SET end_date=to_date(:v1,'YYYYMMDDHH24MISS') WHERE imsi=:v2 AND  begin_date=to_date(:v3,'YYYYMMDDHH24MISS')"
+			);			
+
+			/*更新记录*/
+			if(flag[0] == '2')
+			{
+				EXEC SQL AT :g_TagDB.server_id PREPARE ora_pre_update FROM :chUpdateSql;
+				EXEC SQL AT :g_TagDB.server_id EXECUTE ora_pre_update USING :end_date, :imsi_no, :begin_date;
+				g_TagDB.sqlcode = SQLCODE;				
+				
+				if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+				{
+					EXEC SQL AT :g_TagDB.server_id PREPARE ora_pre_insert FROM :chInsertSql;
+					EXEC SQL AT :g_TagDB.server_id EXECUTE ora_pre_insert USING :imsi_no, :msisdn, :begin_date, :end_date;
+					g_SrcDB.sqlcode = SQLCODE;
+					if(SQLCODE)
+					{
+						sprintf(g_DataLog.LogBuffer, "invalid update record:%s,%s,%s,%s,%s", imsi_no, msisdn, begin_date, end_date, flag);
+						busi_write_datalog(g_DataLog.LogBuffer);
+						DB_SQLERR_SPRINTF;
+						BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+					}
+				}
+			}
+			/*新增记录*/
+			if(flag[0]=='1')
+			{
+				EXEC SQL AT :g_TagDB.server_id PREPARE ora_pre_insert FROM :chInsertSql;
+				EXEC SQL AT :g_TagDB.server_id EXECUTE ora_pre_insert USING :imsi_no, :msisdn, :begin_date, :end_date;
+				g_SrcDB.sqlcode = SQLCODE;
+				if(SQLCODE)
+				{
+					sprintf(g_DataLog.LogBuffer, "invalid insert record:%s,%s,%s,%s,%s", imsi_no, msisdn, begin_date, end_date, flag);
+					busi_write_datalog(g_DataLog.LogBuffer);
+					DB_SQLERR_SPRINTF;
+					BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				}
+			}
+		}
+
+		/* 删除刚刚处理完的数据记录 */
+		EXEC SQL AT :g_SrcDB.server_id DELETE FROM wPhoneImsiChg WHERE CURRENT OF ora_cur_obj;
+		g_SrcDB.sqlcode = SQLCODE;	
+		
+		if(SQLCODE)
+		{
+			DB_SQLERR_SPRINTF;
+			BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+			EXEC SQL AT :g_SrcDB.server_id CLOSE ora_cur_obj;			
+			EXEC SQL AT :g_SrcDB.server_id ROLLBACK WORK;
+			EXEC SQL AT :g_TagDB.server_id ROLLBACK WORK;
+			return -1;
+		}
+
+		/*写日志*/
+		sprintf(g_DataLog.LogBuffer, "delete record:%s,%s,%s,%s,%s", imsi_no, msisdn, begin_date, end_date, flag);
+		busi_write_datalog(g_DataLog.LogBuffer);
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :g_SrcDB.server_id CLOSE ora_cur_obj;
+	/* 提交删除操作事务 */
+	EXEC SQL AT :g_SrcDB.server_id COMMIT WORK;
+	EXEC SQL AT :g_TagDB.server_id COMMIT WORK;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:总记录数=%d,正常记录数=%d,非法记录数=%d", iLoopCount, iSuccessCount, iErrorCount);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+
+	return 0;
+}
+
+/*
+function:   busi_db_RENT()
+description:
+		处理RENT
+Input:      
+Output:
+		0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_RENT(void)
+{
+	int iRcode;
+	int iLoopCount, iErrorCount, iSuccessCount;
+	char chSqlBuffer[4096+1];
+	char chInsertSql[4096+1];
+	char chUpdateSql[4096+1];
+
+	char local_msisdn[64+1];
+	char roam_msisdn[64+1];
+	char begin_date[64+1];
+	char end_date[64+1];
+	char flag[64+1];
+
+	/* 生成查询SQL语句 */
+	MEMSET(chSqlBuffer);
+
+	sprintf
+	(
+		chSqlBuffer, 
+		"SELECT roam_phone, local_phone, to_char(start_date,'YYYYMMDDHH24MISS'), to_char(end_date,'YYYYMMDDHH24MISS'), flag  FROM wPhoneImsiRent WHERE flag != '0' ORDER BY op_time, start_date, flag FOR UPDATE"
+	);
+
+#ifdef DEBUG
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+#endif	
+
+	/* 生成查询游标 */
+	EXEC SQL AT :g_SrcDB.server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :g_SrcDB.server_id DECLARE ora_cur_obj1 CURSOR FOR ora_pre;
+	EXEC SQL AT :g_SrcDB.server_id OPEN ora_cur_obj1;
+	g_SrcDB.sqlcode = SQLCODE;
+	
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+
+	iLoopCount = 0;
+	iErrorCount = 0;
+	iSuccessCount= 0;
+	
+	/* 处理所有的数据记录 */
+	for(;;)
+	{
+		EXEC SQL AT :g_SrcDB.server_id
+		FETCH
+			ora_cur_obj1
+		INTO
+			:roam_msisdn,		
+			:local_msisdn,
+			:begin_date,			
+			:end_date,
+			:flag
+		;
+		g_SrcDB.sqlcode = SQLCODE;
+		
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :g_SrcDB.server_id CLOSE ora_cur_obj1;
+				EXEC SQL AT :g_SrcDB.server_id ROLLBACK WORK;
+				EXEC SQL AT :g_TagDB.server_id ROLLBACK WORK;
+				return -1;
+			}
+		}
+
+		cf_string_trim(roam_msisdn);		
+		cf_string_trim(local_msisdn);
+		cf_string_trim(begin_date);
+		cf_string_trim(end_date);
+		cf_string_trim(flag);	
+
+		iLoopCount++;
+
+		/*合法性验证*/
+		iRcode = busi_check_msisdn(local_msisdn) || (flag[0] != '1' && flag[0] != '2');
+		if(iRcode)
+		{
+			iErrorCount++;
+			
+			/*写日志*/
+			sprintf(g_DataLog.LogBuffer, "invalid record:%s,%s,%s,%s,%s", roam_msisdn, local_msisdn, begin_date, end_date, flag);
+			busi_write_datalog(g_DataLog.LogBuffer);
+		}
+		else
+		{
+			iSuccessCount++;
+
+			MEMSET(chInsertSql);
+			MEMSET(chUpdateSql);
+
+			sprintf(
+				chInsertSql,
+				"INSERT INTO cdma_gsm_relationship VALUES(:v1, :v2, to_date(:v3,'YYYYMMDDHH24MISS'), to_date(:v4,'YYYYMMDDHH24MISS'), '租机')"
+			);
+
+			sprintf(
+				chUpdateSql,
+				"UPDATE cdma_gsm_relationship SET end_date=to_date(:v1,'YYYYMMDDHH24MISS') WHERE trim(roam_msisdn)=:v2 AND trim(local_msisdn)=:v3  AND begin_date=to_date(:v3,'YYYYMMDDHH24MISS')"
+			);
+
+			/*更新记录*/
+			if(flag[0] == '2')
+			{
+				EXEC SQL AT :g_TagDB.server_id PREPARE ora_pre_update FROM :chUpdateSql;
+				EXEC SQL AT :g_TagDB.server_id EXECUTE ora_pre_update USING :end_date, :roam_msisdn, :local_msisdn, :begin_date;
+
+				g_TagDB.sqlcode = SQLCODE;				
+				
+				if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+				{
+					EXEC SQL AT :g_TagDB.server_id PREPARE ora_pre_insert FROM :chInsertSql;
+					EXEC SQL AT :g_TagDB.server_id EXECUTE ora_pre_insert USING :roam_msisdn,:local_msisdn, :begin_date, :end_date;
+					g_SrcDB.sqlcode = SQLCODE;
+					if(SQLCODE)
+					{
+						sprintf(g_DataLog.LogBuffer, "invalid update record:%s,%s,%s,%s,%s", roam_msisdn, local_msisdn, begin_date, end_date, flag);
+						busi_write_datalog(g_DataLog.LogBuffer);
+						DB_SQLERR_SPRINTF;
+						BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+					}
+				}
+			}
+			/*新增记录*/
+			if(flag[0]=='1')
+			{
+				EXEC SQL AT :g_TagDB.server_id PREPARE ora_pre_insert FROM :chInsertSql;
+				EXEC SQL AT :g_TagDB.server_id EXECUTE ora_pre_insert USING :roam_msisdn, :local_msisdn, :begin_date, :end_date;
+				g_SrcDB.sqlcode = SQLCODE;
+				if(SQLCODE)
+				{
+					sprintf(g_DataLog.LogBuffer, "invalid insert record:%s,%s,%s,%s,%s", roam_msisdn, local_msisdn, begin_date, end_date, flag);
+					busi_write_datalog(g_DataLog.LogBuffer);
+					DB_SQLERR_SPRINTF;
+					BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);					
+				}
+			}		
+		}
+
+		/* 删除刚刚处理完的数据记录 */
+		/*
+		EXEC SQL AT :g_SrcDB.server_id DELETE FROM kor_msisdn_imsi WHERE CURRENT OF ora_cur_obj1;
+		*/
+		/* 更新刚刚处理完的数据记录*/
+		EXEC SQL AT :g_SrcDB.server_id UPDATE wPhoneImsiRent SET flag = '0' WHERE CURRENT OF ora_cur_obj1;
+		g_SrcDB.sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			DB_SQLERR_SPRINTF;
+			BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+			EXEC SQL AT :g_SrcDB.server_id CLOSE ora_cur_obj1;
+			EXEC SQL AT :g_SrcDB.server_id ROLLBACK WORK;
+			EXEC SQL AT :g_TagDB.server_id ROLLBACK WORK;
+			return -1;
+		}
+
+		/*写日志*/
+		sprintf(g_DataLog.LogBuffer, "delete record:%s,%s,%s,%s,%s", roam_msisdn, local_msisdn, begin_date, end_date, flag);
+		busi_write_datalog(g_DataLog.LogBuffer);
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :g_SrcDB.server_id CLOSE ora_cur_obj1;
+	/* 提交删除操作事务 */
+	EXEC SQL AT :g_SrcDB.server_id COMMIT WORK;
+	EXEC SQL AT :g_TagDB.server_id COMMIT WORK;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:总记录数=%d,正常记录数=%d,非法记录数=%d", iLoopCount, iSuccessCount, iErrorCount);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+
+	return 0;
+}

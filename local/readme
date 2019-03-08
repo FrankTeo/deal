@@ -1,0 +1,28 @@
+#define FEEIND_TABLE	"fee_plan_index"			语音费率计划索引表
+
+#define CFEEPLAN_TABLE	"cfee_plan_info"			通话费
+#define LFEEPLAN_TABLE	"lfee_plan_info"			长途费
+
+#define DATACFEE_TABLE  "data_cfee_plan"			数据基本费率计划表
+#define DATAOFEE_TABLE  "data_ofee_plan"			数据附加费率计划表
+
+#define IFEEIND_TABLE	"ifee_plan_index"			语音信息费费率计划索引表
+#define IFEEPLAN_TABLE	"ifee_plan_info"			语音信息费
+
+
+#define FAVIND_TABLE	"fav_index"					套餐信息索引表
+#define FAV_CFEE_TABLE  "voicefav_cfee_plan"		通话费套餐
+#define FAV_LFEE_TABLE  "voicefav_lfee_plan"		长途费套餐
+#define	DATAFAV_TABLE   "datafav_fee_plan"			数据个性化批价费率表
+
+#define FEERATE_TABLE	"fee_rate_base"				基础费率表
+
+#define DATESND_TABLE   "date_code_snd"				个批日期编码表
+#define LOCATION_TABLE	"location_code_info"		小区代码表
+
+#define	VPMNCODE_TABLE  "vpmn_code_info"			集团编码表
+#define VPMNPHONE_TABLE "vpmn_phone_prefix"			VPMN固定局向配置表
+
+#define ACCOUNT_TABLE   "account_id_info"			账号关系转换表
+
+(h1h2h3_table->h1h2h3CodeAllocate)[i].long_code

@@ -1,0 +1,1696 @@
+/*
+Copyright (C), 1995-2005, Si-Tech Information Technology Ltd. 
+file_name:	business_db.pc
+author:		caoshun
+version:	1.00
+date:		2004-08-27
+description:
+			BOSS 计费-初始化-数据库操作(业务相关)函数-代码文件
+others:
+history:
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+EXEC SQL INCLUDE sqlca;
+EXEC SQL INCLUDE oraca;
+EXEC ORACLE OPTION (ORACA=YES);
+
+#include "mydefine.h"
+#include "billing_init.h"
+#include "business.h"
+#include "function.h"
+#include "CookieFunc.h"
+#include "ErrLog.h"
+
+#include "database.h"
+#include "business_db.h"
+
+/* 格式化数据库错误信息 */
+#define DB_SQLERR_SPRINTF {*(sqlca.sqlerrm.sqlerrmc+sqlca.sqlerrm.sqlerrml-1) = '\0'; sprintf(g_RunLog.LogBuffer, "DB:ERR:num[%d],msg[%s]", sqlca.sqlcode, sqlca.sqlerrm.sqlerrmc);}
+
+/* 外部全局变量引用 */
+extern struct stDB_DBInfo g_BossDB;
+extern struct stDB_DBInfo g_BillDB;
+extern struct stErrLog    g_RunLog;
+extern struct stErrLog    g_ErrLog;
+extern struct stApp_Data g_AppData;
+
+extern struct stBaseFile_Data g_CustMsgBaseFile;
+
+/* 本地全局变量 */
+
+/*
+function:   busi_db_get_sysproc()
+description:
+			取数据库表sys_proc中的数据
+Input:      
+			dbinfo:数据库共用数据
+			dbdata:sys_proc表数据
+Output:
+            0:成功，1:无数据，other:不成功
+Return:     
+others: 
+*/
+int  busi_db_get_sysproc(struct stDB_DBInfo *dbinfo, struct stBusiDB_SysProc *dbdata)
+{
+	EXEC SQL AT :dbinfo->server_id
+	SELECT
+		operator_id, process_status
+	INTO
+		:dbdata->operator_id,
+		:dbdata->process_status
+	FROM
+		sys_proc 
+	WHERE
+		program_name=:dbdata->program_name
+	AND 
+		service_id=:g_AppData.trade_type		
+	;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE != 0)
+	{
+		if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+		{
+			return 0;
+		}
+		else
+		{
+			DB_SQLERR_SPRINTF;
+			BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		}
+		return -1;
+	}
+	
+	return 0;
+}
+
+/*
+function:   busi_db_set_sysproc_operate()
+description:
+			设置数据库表sys_proc中operate字段
+Input:      
+			dbinfo:数据库共用数据
+			dbdata:sys_proc表数据
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int  busi_db_set_sysproc_operate(struct stDB_DBInfo *dbinfo, struct stBusiDB_SysProc *dbdata)
+{
+	EXEC SQL AT :dbinfo->server_id
+	UPDATE
+		sys_proc
+	SET
+		operator_id=:dbdata->operator_id
+	WHERE
+		program_name=:dbdata->program_name
+	AND 
+		service_id=:g_AppData.trade_type
+	;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE != 0)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+	
+	EXEC SQL AT :dbinfo->server_id COMMIT WORK;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE != 0)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}	
+	
+	return 0;
+}
+
+/*
+function:   busi_db_get_basefav()
+description:
+			取数据库表dBaseFav中的数据
+Input:      
+			dbinfo:数据库对象
+			fileobj:BASE文件对象
+			dbargv:BASE表操作参数
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_get_basefav   (struct stDB_DBInfo *dbinfo, struct stBaseFile_Data *fileobj, struct stBusiData_Argv *dbargv)
+{
+	int iRcode;
+	int iSearchIndex;
+	int iLoopCount, iRecordCount0, iRecordCount1;
+	char chSqlBuffer[4096+1];
+	char chDate14[14+1];
+	char chCondition[64+1];
+	struct stBusiDB_BaseFav stRecord;
+	struct stBusiMem_CustMsgData stCustMsgData;
+
+	MEMSET(chDate14);
+	strcpy(chDate14, dbargv->sql_Date6);	
+
+	/* 生成SQL语句 */
+	MEMSET(chSqlBuffer);
+	
+	if(strlen(dbargv->sql_Condition) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbargv->sql_Condition, "msisdn");
+		
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn) msisdn,"
+				" fav_brand,"
+				" fav_big_type,"
+				" fav_type,"
+				" trim(flag_code),"
+				" fav_order,"
+				" fav_peroid,"
+				" to_char(free_value),"
+				" to_char(begin_time,'YYYYMMDDHH24MISS') begin_time,"
+				" to_char(end_time,'YYYYMMDDHH24MISS'),"
+				" to_char(id_no),"
+				" group_id,"
+				" product_code "
+			"FROM"
+				" dAllUser "
+			"WHERE"
+				" to_char(end_time,'YYYYMM')>='%s' and"
+				" to_char(begin_time,'YYYYMM')<='%s' and"
+				" %s "
+			"UNION ALL "
+			"SELECT"
+				" trim(msisdn),"
+				" fav_brand,"
+				" fav_big_type,"
+				" fav_type,"
+				" trim(flag_code),"
+				" fav_order,"
+				" fav_peroid,"
+				" to_char(free_value),"
+				" to_char(begin_time,'YYYYMMDDHH24MISS'),"
+				" to_char(end_time,'YYYYMMDDHH24MISS'),"
+				" to_char(id_no),"
+				" group_id,"
+				" product_code "
+			"FROM"
+				" dBaseFav "
+			"WHERE"
+				" to_char(end_time,'YYYYMM')>='%s' and"
+				" to_char(begin_time,'YYYYMM')<='%s' and"
+				" %s "
+			"ORDER BY"
+				" msisdn, begin_time",
+			chDate14,
+			chDate14,
+			chCondition,
+			chDate14,
+			chDate14,
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn) msisdn,"
+				" fav_brand,"
+				" fav_big_type,"
+				" fav_type,"
+				" trim(flag_code),"
+				" fav_order,"
+				" fav_peroid,"
+				" to_char(free_value),"
+				" to_char(begin_time,'YYYYMMDDHH24MISS') begin_time,"
+				" to_char(end_time,'YYYYMMDDHH24MISS'),"
+				" to_char(id_no),"
+				" group_id,"
+				" product_code "
+			"FROM"
+				" dAllUser "
+			"WHERE"
+				" to_char(end_time,'YYYYMM')>='%s' and"
+				" to_char(begin_time,'YYYYMM')<='%s' "
+			"UNION ALL "
+			"SELECT"
+				" trim(msisdn),"
+				" fav_brand,"
+				" fav_big_type,"
+				" fav_type,"
+				" trim(flag_code),"
+				" fav_order,"
+				" fav_peroid,"
+				" to_char(free_value),"
+				" to_char(begin_time,'YYYYMMDDHH24MISS'),"
+				" to_char(end_time,'YYYYMMDDHH24MISS'),"
+				" to_char(id_no),"
+				" group_id,"
+				" product_code "
+			"FROM"
+				" dBaseFav "
+			"WHERE"
+				" to_char(end_time,'YYYYMM')>='%s' and"
+				" to_char(begin_time,'YYYYMM')<='%s' "
+			"ORDER BY"
+				" msisdn, begin_time",
+			chDate14,
+			chDate14,
+			chDate14,
+			chDate14
+		);
+	}
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj1 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj1;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+		return -1;
+	}
+
+	iLoopCount = 0;
+	iRecordCount0 = 0;
+	iRecordCount1 = 0;
+	
+	/* 处理所有数据记录 */
+	for(;;)
+	{
+		MEMSET1(stRecord);
+
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj1
+		INTO
+			:stRecord.msisdn, 
+			:stRecord.fav_brand,
+			:stRecord.fav_big_type,
+			:stRecord.fav_type,
+			:stRecord.flag_code,
+			:stRecord.fav_order,
+			:stRecord.fav_peroid,
+			:stRecord.free_value,
+			:stRecord.begin_date,
+			:stRecord.end_date,
+			:stRecord.id_no,
+			:stRecord.group_id,
+			:stRecord.product_code
+		;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			/* 处理完所有数据记录 */
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj1;
+				return -1;
+			}
+		}
+
+		cf_string_trim(stRecord.msisdn);
+		cf_string_trim(stRecord.fav_brand);
+		cf_string_trim(stRecord.fav_big_type);
+		cf_string_trim(stRecord.fav_type);
+		cf_string_trim(stRecord.flag_code);
+		cf_string_trim(stRecord.fav_order);
+		cf_string_trim(stRecord.fav_peroid);
+		cf_string_trim(stRecord.free_value);
+		cf_string_trim(stRecord.begin_date);
+		cf_string_trim(stRecord.end_date);
+		cf_string_trim(stRecord.id_no);
+		cf_string_trim(stRecord.group_id);
+		cf_string_trim(stRecord.product_code);
+
+		iLoopCount++;
+		
+		/* 验证msisdn合法性 */
+		if(busi_check_msisdn(stRecord.msisdn) != 0)
+		{
+			/* 无效数据记录 */
+			iRecordCount0++;
+			busi_basefile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 11);
+			busi_write_errlog(g_ErrLog.LogBuffer);
+			continue;
+		}
+		else
+		{
+			iRecordCount1++;
+		}
+
+		/*山西特别处理*/
+		/*用户状态初始化*/
+		if(strcmp(stRecord.fav_type, "USER") == 0)
+		{
+			MEMSET1(stCustMsgData);
+			
+			stCustMsgData.msisdn = atol(stRecord.msisdn);
+			
+			/*有没有更新状态*/
+			iSearchIndex = cf_datastru_halfsearch((void *)(dbargv->pCustMsg->list), dbargv->pCustMsg->count, (void *)(&stCustMsgData), busi_custmsg_search);
+			if(iSearchIndex >= 0)
+			{		
+				stRecord.flag_code[0] = dbargv->pCustMsg->list[iSearchIndex].flag;
+				stRecord.flag_code[1] = '\0';
+			}
+			else
+			{		
+				strcpy(stRecord.flag_code, stRecord.fav_type);
+			}
+		}			
+
+		/* 内部数据记录处理 */
+		iRcode = busi_initbase_writedata(&stRecord, fileobj, dbargv);
+		if(iRcode)
+		{
+			EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj1;
+			return -1;
+		}
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj1;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:表dAllUser&dBaseFav总记录数=%d,无法识别记录数=%d,普通号码记录数=%d", iLoopCount, iRecordCount0, iRecordCount1);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	return 0;
+}
+
+
+/*
+function:   busi_db_get_basefavchg()
+description:
+			取数据库表dBaseFavChg中的数据
+Input:      
+			dbinfo:数据库共用数据
+			fileobj:BASE文件对象
+			dbargv:BASE表操作参数
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_get_basefavchg(struct stDB_DBInfo *dbinfo, struct stBaseFile_Data *fileobj, struct stBusiData_Argv *dbargv)
+{
+	int iRcode, iDoFlag;
+	int iLoopCount, iRecordCount0, iRecordCount1;
+	char chSqlBuffer[4096+1];
+	char chCondition[64+1];
+	struct stBusiDB_BaseFavChg stRecord;
+
+	/* 生成查询SQL语句 */
+	MEMSET(chSqlBuffer);
+
+	if(strlen(dbargv->sql_Condition) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbargv->sql_Condition, "msisdn");
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn),"
+				" fav_brand,"
+				" fav_big_type,"
+				" fav_type,"
+				" trim(flag_code),"
+				" fav_order,"
+				" fav_peroid,"
+				" to_char(free_value),"
+				" to_char(begin_time,'YYYYMMDDHH24MISS'),"
+				" to_char(end_time,'YYYYMMDDHH24MISS'),"
+				" to_char(id_no),"
+				" group_id,"
+				" product_code,"
+				" flag,"
+				" to_char(deal_time,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" wBaseFavChg2 "
+			"WHERE"
+				" %s "
+			"ORDER BY"
+				" msisdn, deal_time, begin_time "
+			"FOR UPDATE",
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn),"
+				" fav_brand,"
+				" fav_big_type,"
+				" fav_type,"
+				" trim(flag_code),"
+				" fav_order,"
+				" fav_peroid,"
+				" to_char(free_value),"
+				" to_char(begin_time,'YYYYMMDDHH24MISS'),"
+				" to_char(end_time,'YYYYMMDDHH24MISS'),"
+				" to_char(id_no),"
+				" group_id,"
+				" product_code,"
+				" flag,"
+				" to_char(deal_time,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" wBaseFavChg2 "
+			"ORDER BY"
+				" msisdn, deal_time, begin_time "
+			"FOR UPDATE"
+		);			
+	}
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	iLoopCount = 0;
+	iRecordCount0 = 0;
+	iRecordCount1 = 0;
+
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj2 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj2;
+
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+		return -1;
+	}
+
+	/* 处理所有的数据记录 */
+	for(;;)
+	{
+		iDoFlag = 0;
+		MEMSET1(stRecord);
+
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj2
+		INTO
+			:stRecord.msisdn, 
+			:stRecord.fav_brand,
+			:stRecord.fav_big_type,
+			:stRecord.fav_type,
+			:stRecord.flag_code,
+			:stRecord.fav_order,
+			:stRecord.fav_peroid,
+			:stRecord.free_value,
+			:stRecord.begin_date,
+			:stRecord.end_date,
+			:stRecord.id_no,
+			:stRecord.group_id,
+			:stRecord.product_code,
+			:stRecord.flag,
+			:stRecord.deal_date
+		;
+	
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj2;
+				EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+				return -1;
+			}
+		}
+
+		cf_string_trim(stRecord.msisdn);
+		cf_string_trim(stRecord.fav_brand);
+		cf_string_trim(stRecord.fav_big_type);
+		cf_string_trim(stRecord.fav_type);
+		cf_string_trim(stRecord.flag_code);
+		cf_string_trim(stRecord.fav_order);
+		cf_string_trim(stRecord.fav_peroid);
+		cf_string_trim(stRecord.free_value);
+		cf_string_trim(stRecord.begin_date);
+		cf_string_trim(stRecord.end_date);
+		cf_string_trim(stRecord.id_no);
+		cf_string_trim(stRecord.group_id);
+		cf_string_trim(stRecord.product_code);
+		cf_string_trim(stRecord.flag);
+		cf_string_trim(stRecord.deal_date);
+
+		/*山西特别处理*/
+		/*用户状态初始化*/
+		if(strcmp(stRecord.fav_type, "USER") == 0)
+		{
+			strcpy(stRecord.flag_code, stRecord.fav_type);
+		}
+
+		iLoopCount++;
+
+		/* 验证msisdn的合法性 */
+		/* 验证操作标识合法性*/
+		/* 验证有效时间合法性*/
+		if(
+			busi_check_msisdn(stRecord.msisdn) != 0
+			||
+			(strcmp(stRecord.flag, "1") != 0 && strcmp(stRecord.flag, "2") != 0)
+			||
+			strncmp(stRecord.begin_date, g_AppData.deal_date14, 6) > 0
+		)
+		{
+			/* 无效的数据记录 */
+			iRecordCount0++;
+			busi_basefile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 12);
+			busi_write_errlog(g_ErrLog.LogBuffer);
+			iDoFlag = 0;
+		}
+		else
+		{
+			iRecordCount1++;
+			iDoFlag = 1;
+		}
+
+		/* 无效记录无需处理，直接删除 */
+		if(iDoFlag == 1)
+		{
+			/* 数据记录内部处理 */
+			iRcode = busi_changebase_writedata(&stRecord, fileobj, dbargv, dbargv->file_SysMonth);
+			if(iRcode)
+			{
+				sprintf(g_RunLog.LogBuffer, "APP:ERR:msisdn=%s", stRecord.msisdn);
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj2;
+				EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+				return -1;
+			}
+
+			/*开始时间为上月的记录自动处理*/
+			if(memcmp(stRecord.begin_date+4, dbargv->file_PrevMonth, 2) == 0)
+			{
+				iRcode = busi_changebase_writedata(&stRecord, fileobj, dbargv, dbargv->file_PrevMonth);
+				if(iRcode)
+				{
+					sprintf(g_RunLog.LogBuffer, "APP:ERR:msisdn=%s", stRecord.msisdn);
+					BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+					EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj2;
+					EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+					return -1;
+				}
+				busi_basefile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 15);
+				busi_write_errlog(g_ErrLog.LogBuffer);
+			}		
+		}
+
+		/* 将要删除的记录数据写入日志 */
+		busi_basefile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 14);
+		busi_write_errlog(g_ErrLog.LogBuffer);
+
+		/* 删除刚刚处理完的数据记录 */
+		EXEC SQL AT :dbinfo->server_id DELETE FROM wBaseFavChg2 WHERE CURRENT OF ora_cur_obj2;
+		dbinfo->sqlcode = SQLCODE;		
+		if(SQLCODE)
+		{
+			DB_SQLERR_SPRINTF;
+			BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+			EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj2;
+			EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+			return -1;
+		}	
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj2;
+	/* 提交删除操作事务 */
+	EXEC SQL AT :dbinfo->server_id COMMIT WORK;
+
+	return 0;
+}
+
+
+/*
+function:   busi_db_get_relationfav()
+description:
+			取数据库表dRelationFav中的数据
+Input: 
+			dbinfo:数据库共用数据
+			fileobj:RELATION文件对象
+			dbargv:RELATION表操作参数
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_get_relationfav(struct stDB_DBInfo *dbinfo, struct stRelationFile_Data *fileobj, struct stBusiData_Argv *dbargv)
+{
+	int iRcode;
+	int iLoopCount, iRecordCount0, iRecordCount1;
+	char chSqlBuffer[4096+1];
+	char chDate14[14+1];
+	char chCondition[64+1];
+	struct stBusiDB_RelationFav stRecord;
+
+	MEMSET(chDate14);
+	strcpy(chDate14, dbargv->sql_Date6);	
+
+	/* 生成SQL语句 */
+	MEMSET(chSqlBuffer);
+	
+	if(strlen(dbargv->sql_Condition) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbargv->sql_Condition, "msisdn");
+		
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn),"
+				" relation_code,"
+				" trim(other_code),"
+				" to_char(begin_date,'YYYYMMDDHH24MISS'),"
+				" to_char(end_date,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" dRelationFavFav "
+			"WHERE"
+				" to_char(end_date,'YYYYMM')>='%s' and"
+				" to_char(begin_date,'YYYYMM')<='%s' and"
+				" %s "
+			"ORDER BY"
+				" msisdn, begin_date",
+			dbargv->sql_Date6,
+			dbargv->sql_Date6,
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn),"
+				" relation_code,"
+				" trim(other_code),"
+				" to_char(begin_date,'YYYYMMDDHH24MISS'),"
+				" to_char(end_date,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" dRelationFavFav "
+			"WHERE"
+				" to_char(end_date,'YYYYMM')>='%s' and"
+				" to_char(begin_date,'YYYYMM')<='%s' "
+			"ORDER BY"
+				" msisdn, begin_date",
+			dbargv->sql_Date6,
+			dbargv->sql_Date6
+		);
+	}
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);		
+
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj3 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj3;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+
+	iLoopCount = 0;
+	iRecordCount0 = 0;
+	iRecordCount1 = 0;
+	
+	/* 处理所有的数据记录 */
+	for(;;)
+	{
+		MEMSET1(stRecord);
+
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj3
+		INTO
+			:stRecord.msisdn, 
+			:stRecord.relation_code,
+			:stRecord.other_code,
+			:stRecord.begin_date,
+			:stRecord.end_date
+		;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj3;
+				return -1;
+			}
+		}
+
+		cf_string_trim(stRecord.msisdn);	
+		cf_string_trim(stRecord.relation_code);
+		cf_string_trim(stRecord.other_code);
+		cf_string_trim(stRecord.begin_date);
+		cf_string_trim(stRecord.end_date);
+
+		iLoopCount++;
+		/* 验证msisdn的合法性 */
+		if(busi_check_msisdn(stRecord.msisdn) != 0)
+		{
+			/* 无效的数据记录 */
+			iRecordCount0++;
+			busi_relationfile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 11);
+			busi_write_errlog(g_ErrLog.LogBuffer);
+			continue;
+		}
+		else
+		{
+			/* msisdn 记录 */
+			iRecordCount1++;
+		}
+		
+		/* 数据记录内部处理 */
+		iRcode = busi_initrelation_writedata(&stRecord, fileobj, dbargv);
+		if(iRcode)
+		{
+			EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj3;
+			return -1;
+		}
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj3;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:表dRelationFav总记录数=%d,无法识别记录数=%d,普通号码记录数=%d", iLoopCount, iRecordCount0, iRecordCount1);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+
+	return 0;
+}
+
+
+/*
+function:   busi_db_get_relationfavchg()
+description:
+			取数据库表dRelationFavChg中的数据
+Input:      
+			dbinfo:数据库共用数据
+			fileobj:RELATION文件对象
+			dbargv:RELATION表操作参数
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_get_relationfavchg(struct stDB_DBInfo *dbinfo, struct stRelationFile_Data *fileobj, struct stBusiData_Argv *dbargv)
+{
+	int iRcode, iDoFlag;
+	int iLoopCount, iRecordCount0, iRecordCount1;
+	char chSqlBuffer[4096+1];
+	char chCondition[64+1];
+	struct stBusiDB_RelationFavChg stRecord;
+
+	/* 生成查询SQL语句 */
+	MEMSET(chSqlBuffer);
+
+	if(strlen(dbargv->sql_Condition) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbargv->sql_Condition, "msisdn");
+		
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn),"
+				" relation_code,"
+				" trim(other_code),"
+				" to_char(begin_date,'YYYYMMDDHH24MISS'),"
+				" to_char(end_date,'YYYYMMDDHH24MISS'),"
+				" flag,"
+				" to_char(deal_date,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" wRelationFavChg "
+			"WHERE"
+				" %s "
+			"ORDER BY"
+				" msisdn, deal_date, begin_date "
+			"FOR UPDATE",
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" trim(msisdn),"
+				" relation_code,"
+				" trim(other_code),"
+				" to_char(begin_date,'YYYYMMDDHH24MISS'),"
+				" to_char(end_date,'YYYYMMDDHH24MISS'),"
+				" flag,"
+				" to_char(deal_date,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" wRelationFavChg "
+			"ORDER BY"
+				" msisdn, deal_date, begin_date "
+			"FOR UPDATE"
+		);
+	
+	}
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);			
+
+	iLoopCount = 0;
+	iRecordCount0 = 0;
+	iRecordCount1 = 0;
+
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj4 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj4;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+		return -1;
+	}
+
+	/* 处理所有的数据记录 */
+	for(;;)
+	{
+		iDoFlag = 0;
+		MEMSET1(stRecord);
+
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj4
+		INTO
+			:stRecord.msisdn, 
+			:stRecord.relation_code,
+			:stRecord.other_code,
+			:stRecord.begin_date,
+			:stRecord.end_date,
+			:stRecord.flag,
+			:stRecord.deal_date
+		;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj4;
+				EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+				return -1;
+			}
+		}
+
+		cf_string_trim(stRecord.msisdn); 
+		cf_string_trim(stRecord.relation_code);
+		cf_string_trim(stRecord.other_code);
+		cf_string_trim(stRecord.begin_date);
+		cf_string_trim(stRecord.end_date);
+		cf_string_trim(stRecord.flag);
+		cf_string_trim(stRecord.deal_date);
+
+		iLoopCount++;
+
+		/* 验证msisdn的合法性 */
+		/* 验证操作标识合法性*/
+		/* 验证有效时间合法性*/
+		if(
+			busi_check_msisdn(stRecord.msisdn) != 0
+			||
+			 (strcmp(stRecord.flag, "1") != 0 && strcmp(stRecord.flag, "2") != 0)
+			||
+			strncmp(stRecord.begin_date, g_AppData.deal_date14, 6) > 0
+		)
+		{
+			/* 无效的数据记录 */
+			iRecordCount0++;
+			busi_relationfile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 12);
+			busi_write_errlog(g_ErrLog.LogBuffer);
+			iDoFlag = 0;
+		}
+		else
+		{
+			/* msisdn 记录 */
+			iRecordCount1++;
+			iDoFlag = 1;
+		}
+
+		/* 无效记录无需处理，直接删除 */
+		if(iDoFlag == 1)
+		{
+			/* 数据记录内部处理 */
+			iRcode = busi_changerelation_writedata(&stRecord, fileobj, dbargv, dbargv->file_SysMonth);
+			if(iRcode)
+			{
+				sprintf(g_RunLog.LogBuffer, "APP:ERR:msisdn=%s", stRecord.msisdn);
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj4;
+				EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+				return -1;
+			}
+
+			/*开始时间为上月的记录自动处理*/
+			if(memcmp(stRecord.begin_date+4, dbargv->file_PrevMonth, 2) == 0)
+			{
+				iRcode = busi_changerelation_writedata(&stRecord, fileobj, dbargv, dbargv->file_PrevMonth);
+				if(iRcode)
+				{
+					sprintf(g_RunLog.LogBuffer, "APP:ERR:msisdn=%s", stRecord.msisdn);
+					BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+					EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj4;
+					EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+					return -1;
+				}
+				busi_relationfile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 15);
+				busi_write_errlog(g_ErrLog.LogBuffer);
+			}					
+		}
+
+		/* 将要删除的记录数据写入日志 */
+		busi_relationfile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 14);
+		busi_write_errlog(g_ErrLog.LogBuffer);
+		
+		/* 删除刚刚处理完的数据记录 */
+		EXEC SQL AT :dbinfo->server_id DELETE FROM wRelationFavChg WHERE CURRENT OF ora_cur_obj4;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			DB_SQLERR_SPRINTF;
+			BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+			EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj4;
+			EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+			return -1;
+		}
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj4;
+	/* 提交删除操作事务 */
+	EXEC SQL AT :dbinfo->server_id COMMIT WORK;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:表wRelationFavChg总记录数=%d,无法识别记录数=%d,普通号码记录数=%d", iLoopCount, iRecordCount0, iRecordCount1);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	return 0;
+}
+
+/*
+function:   busi_db_get_h1h2h3h4()
+description:
+			取数据库表h1h2h3_code_allocate中的数据
+Input:      
+			dbinfo:数据库共用数据
+			dbdata:h1h2h3_code_allocate表数据
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_get_h1h2h3h4(struct stDB_DBInfo *dbinfo, struct stBusiDB_H1H2H3H4_LIST *dbdata)
+{
+	int iLoopCount, iRecordCount0, iRecordCount1;
+	char chSqlBuffer[4096+1];
+	char chLongCode[4+1];
+	char chCondition[64+1];
+
+	/* 生成查询SQL语句 */
+	MEMSET(chSqlBuffer);
+	
+	if(strlen(dbdata->condition_argv) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbdata->condition_argv, "a.h1h2h3h4");	
+		
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT DISTINCT "
+				"substr(a.h1h2h3h4,1,7) "
+			"FROM"
+				" h1h2h3_code_allocate a, "
+				" city_list b "
+			"WHERE"
+				" b.prov_code = '%s' and "
+				" a.long_code=b.long_code and "
+				" substr(a.h1h2h3h4,1,3) >= '134' and "
+				/*山西特别处理*/
+				/*" substr(a.h1h2h3h4,1,3) <= '139' and "*/
+				" substr(a.h1h2h3h4,1,3) <= '200' and "
+				" substr(a.h1h2h3h4,1,3) != '1349' and "
+				" %s "
+			"ORDER BY"
+				" substr(a.h1h2h3h4,1,7) ",
+			g_AppData.post_code,
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT DISTINCT "
+				"substr(a.h1h2h3h4,1,7) "
+			"FROM"
+				" h1h2h3_code_allocate a, "
+				" city_list b "
+			"WHERE"
+				" b.prov_code = '%s' and "
+				" a.long_code=b.long_code and "
+				" substr(a.h1h2h3h4,1,3) >= '134' and "
+				/*山西特别处理*/
+				/*" substr(a.h1h2h3h4,1,3) <= '139' and "*/
+				" substr(a.h1h2h3h4,1,3) <= '200' and "
+				" substr(a.h1h2h3h4,1,3) != '1349' "
+			"ORDER BY"
+				" substr(a.h1h2h3h4,1,7) ",
+			g_AppData.post_code
+		);
+	}
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);			
+
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj5 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj5;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+
+	iLoopCount = 0;
+	iRecordCount0 = 0;
+	iRecordCount1 = 0;
+
+	dbdata->count = 0;
+	
+	/* 处理所有的数据记录 */
+	for(;;)
+	{
+		MEMSET(chLongCode);
+		
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj5
+		INTO
+			:dbdata->list[dbdata->count].h1h2h3h4
+		;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj5;
+				return -1;
+			}
+		}
+
+		cf_string_trim(dbdata->list[dbdata->count].h1h2h3h4);	
+
+		iLoopCount++;
+		
+		/* 验证h1h2h3h4的合法性 */
+		if(busi_check_h1h2h3h4(dbdata->list[dbdata->count].h1h2h3h4) != 0)
+		{
+			/* 无效的数据记录 */
+			iRecordCount0++;
+			sprintf(g_RunLog.LogBuffer, "APP:ERR:h1h2h3h4=%s", dbdata->list[dbdata->count].h1h2h3h4);
+			busi_write_errlog(g_RunLog.LogBuffer);
+			continue;
+		}
+		else
+		{
+			/* 有效 记录 */
+			iRecordCount1++;
+			dbdata->count++;
+		}
+		
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj5;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:总记录数=%d,无法识别记录数=%d,普通号码记录数=%d", iLoopCount, iRecordCount0, iRecordCount1);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+
+	return 0;
+}
+
+/*
+function:   busi_db_count_custmsg()
+description:
+			取数据库表dCustMsg中的数据的个数
+Input:      
+			dbinfo:数据库共用数据
+			memdata:dCustMsg内存结构
+			dbargv:BASE文件操作数据
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_count_custmsg(struct stDB_DBInfo *dbinfo, struct stBusiMem_CustMsg *memdata, struct stBusiData_Argv* dbargv)
+{
+	int iRcode;
+	char chSqlBuffer[4096+1];
+	char chCondition[64+1];
+
+	/* 生成SQL语句 */
+	MEMSET(chSqlBuffer);
+	
+	if(strlen(dbargv->sql_Condition) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbargv->sql_Condition, "phone_no");
+		
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" count(*) "
+			"FROM"
+				" dCustMsg "
+			"WHERE"
+				" substr(run_code,2,1)!='A' and "
+				" substr(run_code,2,1)!='K' and "
+				" %s ",
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" count(*) "
+			"FROM"
+				" dCustMsg "
+			"WHERE"
+				" substr(run_code,2,1)!='A' and "
+				" substr(run_code,2,1)!='K' "
+		);
+	}
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj61 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj61;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+	
+	/* 处理所有数据记录 */
+	for(;;)
+	{
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj61
+		INTO
+			:memdata->count
+		;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			/* 处理完所有数据记录 */
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj61;
+				return -1;
+			}
+		}
+
+		break;
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj61;
+
+	/*在原数再加10000*10,因数据信息不停在变化*/
+	memdata->count += 10000*10;
+
+	memdata->list =  (struct stBusiMem_CustMsgData *)calloc(memdata->count, sizeof(struct stBusiMem_CustMsgData));
+	if(memdata->list == NULL)
+	{
+		BUSI_WRITE_RUNLOG(ERROR_APP_9998);
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+function:   busi_db_get_custmsg()
+description:
+			取数据库表dCustMsg中的数据
+Input:      
+			dbinfo:数据库共用数据
+			memdata:dCustMsg表数据
+			dbargv:BASE文件操作数据
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_get_custmsg(struct stDB_DBInfo *dbinfo, struct stBusiMem_CustMsg *memdata, struct stBusiData_Argv *dbargv)
+{
+	int iRcode;
+	unsigned int iLoopCount, iRecordCount0, iRecordCount1;
+	char chSqlBuffer[4096+1];
+	char chCondition[64+1];
+	struct stBusiDB_CustMsg dbdata;
+
+	/* 生成SQL语句 */
+	MEMSET(chSqlBuffer);
+	
+	if(strlen(dbargv->sql_Condition) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbargv->sql_Condition, "phone_no");
+		
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" phone_no,"
+				" run_code,"
+				" to_char(run_time,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" dCustMsg "
+			"WHERE"
+				" substr(run_code,2,1)!='A' and "
+				" substr(run_code,2,1)!='K' and "			
+				" %s "
+			"ORDER BY"
+				" phone_no, run_time",
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" phone_no,"
+				" run_code,"
+				" to_char(run_time,'YYYYMMDDHH24MISS') "
+			"FROM"
+				" dCustMsg "
+			"WHERE"
+				" substr(run_code,2,1)!='A' and "
+				" substr(run_code,2,1)!='K' "					
+			"ORDER BY"
+				" phone_no, run_time"
+		);
+	}
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj6 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj6;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+
+	iLoopCount = 0;
+	iRecordCount0 = 0;
+	iRecordCount1 = 0;
+	
+	/* 处理所有数据记录 */
+	for(;;)
+	{
+		MEMSET1(dbdata);
+
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj6
+		INTO
+			:dbdata.phone_no, 
+			:dbdata.run_code,
+			:dbdata.run_time
+		;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			/* 处理完所有数据记录 */
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj6;
+				return -1;
+			}
+		}
+
+		cf_string_trim(dbdata.phone_no);
+		cf_string_trim(dbdata.run_code);
+		cf_string_trim(dbdata.run_time);
+
+		iLoopCount++;
+
+		if(busi_check_msisdn(dbdata.phone_no) != 0 || strlen(dbdata.run_code) != 2)
+		{
+			/* 无效数据记录 */
+			iRecordCount0++;
+			busi_basefile_sprintfdata((void *)&dbdata, g_ErrLog.LogBuffer, 21);
+			busi_write_errlog(g_ErrLog.LogBuffer);
+			continue;
+		}
+		else
+		{
+			iRecordCount1++;
+		}
+
+		/*超边内存分配大小*/
+		if(iRecordCount1 > memdata->count)
+		{
+			EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj6;
+			BUSI_WRITE_RUNLOG(ERROR_APP_0044);
+			return -1;
+		}
+
+		memdata->list[iRecordCount1-1].msisdn = atol(dbdata.phone_no);
+		memdata->list[iRecordCount1-1].flag = dbdata.run_code[1];
+	}
+
+	/*更新为真实数量*/
+	memdata->count = iRecordCount1;
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj6;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:表dCustMsg总记录数=%d,无法识别记录数=%d,普通号码记录数=%d", iLoopCount, iRecordCount0, iRecordCount1);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+
+	return 0;
+}
+
+/*
+function:   busi_db_get_custmsgchg()
+description:
+			取数据库表
+Input:      
+			dbinfo:数据库共用数据
+			fileobj:BASE文件对象
+			dbargv:BASE文件操作数据
+Output:
+            0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_get_custmsgchg(struct stDB_DBInfo *dbinfo, struct stBaseFile_Data *fileobj, struct stBusiData_Argv *dbargv)
+{
+	int iRcode, iDoFlag;
+	int iLoopCount, iRecordCount0, iRecordCount1;
+	char chSqlBuffer[4096+1];
+	char chCondition[64+1];
+	struct stBusiDB_CustMsgChg stRecord;
+
+	/* 生成查询SQL语句 */
+	MEMSET(chSqlBuffer);
+
+	if(strlen(dbargv->sql_Condition) != 0)
+	{
+		MEMSET(chCondition);
+		sprintf(chCondition, dbargv->sql_Condition, "phone_no");
+		
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" phone_no,"
+				" run_code,"
+				" run_time "
+			"FROM"
+				" wusermsgchg_billing "	
+			"WHERE"
+				" %s "
+			"ORDER BY"
+				" phone_no, run_time "
+			"FOR UPDATE"	,
+			chCondition
+		);
+	}
+	else
+	{
+		sprintf
+		(
+			chSqlBuffer, 
+			"SELECT"
+				" phone_no,"
+				" run_code,"
+				" run_time "
+			"FROM"
+				" wusermsgchg_billing "			
+			"ORDER BY"
+				" phone_no, run_time "
+			"FOR UPDATE"			
+		);		
+	}
+		
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	iLoopCount = 0;
+	iRecordCount0 = 0;
+	iRecordCount1 = 0;	
+		
+	/* 生成查询游标 */
+	EXEC SQL AT :dbinfo->server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :dbinfo->server_id DECLARE ora_cur_obj7 CURSOR FOR ora_pre;
+	EXEC SQL AT :dbinfo->server_id OPEN ora_cur_obj7;
+	dbinfo->sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+	
+	/* 处理所有的数据记录 */
+	for(;;)
+	{
+		iDoFlag = 0;
+		MEMSET1(stRecord);
+
+		EXEC SQL AT :dbinfo->server_id
+		FETCH
+			ora_cur_obj7
+		INTO
+			:stRecord.phone_no, 
+			:stRecord.run_code,
+			:stRecord.run_time
+		;
+		dbinfo->sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj7;
+				EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+				return -1;
+			}
+		}
+
+		cf_string_trim(stRecord.phone_no);
+		cf_string_trim(stRecord.run_code);
+		cf_string_trim(stRecord.run_time);
+
+		iLoopCount++;
+
+		/* 验证msisdn的合法性 */		
+		if(busi_check_msisdn(stRecord.phone_no) != 0 || strlen(stRecord.run_code) != 2)
+		{	
+			/* 无效的数据记录 */
+			iRecordCount0++;
+			busi_basefile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 22);
+			busi_write_errlog(g_ErrLog.LogBuffer);
+			iDoFlag = 0;
+		}
+		else
+		{
+			/*忽略无需处理的记录*/
+			if(
+				stRecord.run_code[1]=='A' 
+				||
+				stRecord.run_code[1]=='K'
+				||
+				stRecord.run_code[1]=='a'
+				||
+				stRecord.run_code[1]=='b'
+				||
+				stRecord.run_code[1]=='c'
+			)
+			{			
+				iDoFlag = 1;				
+			}
+			else
+			{			
+				busi_basefile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 23);
+				busi_write_errlog(g_ErrLog.LogBuffer);
+				iDoFlag = 0;
+			}
+
+			iRecordCount1++;
+		}
+
+		/* 无效记录无需处理，直接删除 */
+		if(iDoFlag == 1)
+		{
+			/*分析记录操作有效性*/
+			iRcode = busi_custmsg_checkinvalid(&stRecord, &g_CustMsgBaseFile, dbargv);
+			if(iRcode)
+			{
+				sprintf(g_RunLog.LogBuffer, "APP:ERR:msisdn=%s", stRecord.phone_no);
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+				EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj7;
+				EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+				return -1;
+			}
+
+			if(dbargv->file_UpdateFlag == 1)
+			{
+				/* 数据记录内部处理 */
+				iRcode = busi_custmsg_writedate(&stRecord, fileobj, dbargv);
+				if(iRcode)
+				{
+					sprintf(g_RunLog.LogBuffer, "APP:ERR:msisdn=%s", stRecord.phone_no);
+					BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+					EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj7;
+					EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+					return -1;
+				}			
+			}			
+		}	
+
+		/* 将要删除的记录数据写入日志 */
+		busi_basefile_sprintfdata((void *)&stRecord, g_ErrLog.LogBuffer, 24);
+		busi_write_errlog(g_ErrLog.LogBuffer);
+		
+		/* 删除刚刚处理完的数据记录 */
+		EXEC SQL AT :dbinfo->server_id DELETE FROM wusermsgchg_billing WHERE CURRENT OF ora_cur_obj7;
+		dbinfo->sqlcode = SQLCODE;		
+		if(SQLCODE)
+		{
+			DB_SQLERR_SPRINTF;
+			BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+			EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj7;
+			EXEC SQL AT :dbinfo->server_id ROLLBACK WORK;
+			return -1;
+		}
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :dbinfo->server_id CLOSE ora_cur_obj7;
+	/* 提交删除操作事务 */
+	EXEC SQL AT :dbinfo->server_id COMMIT WORK;
+
+	/* 生成处理报告统计信息 */ 
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:表wCustMsgChg总记录数=%d,无法识别记录数=%d,普通号码记录数=%d", iLoopCount, iRecordCount0, iRecordCount1);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+
+	return 0;
+}

@@ -1,0 +1,3564 @@
+/*******************************************************************
+* Copyright (C), 1995-2005, Si-Tech Information Technology Ltd.
+* File Name  : deal_communal_data.pc
+* Author     : zhumy
+* Version    : 1.0.0
+* Create date: 2004-06-23
+* Description: 初始化局数据相关函数
+* Others     : 要求ORACLE8及以上版本
+* History    :
+********************************************************************/
+
+#include "deal_utility.h"
+#include "deal_config.h"
+
+/********************************************************** 
+Function:		void  sqlerror()
+Description:	数据库出错处理函数
+Input:			无
+Output:			无
+Return: 		无
+Others:			
+**********************************************************/
+void  sqlerror()
+{
+	char    err_msg[128];
+ 	size_t  buf_len;
+	size_t  msg_len;
+
+	EXEC SQL WHENEVER SQLERROR CONTINUE;
+	printf("message from sqlerror: \n");
+    buf_len = sizeof (err_msg);
+    sqlglm(err_msg, &buf_len, &msg_len);
+	printf("sqlcode=%d ",sqlca.sqlcode);
+	/*
+    printf("%.*s ", msg_len, err_msg);
+	*/
+	err_msg[msg_len]=0;
+    printf("%s ", err_msg);
+
+	printf(" sqlca %.*s\n",sqlca.sqlerrm.sqlerrml,sqlca.sqlerrm.sqlerrmc);
+	printf("oraca %.*s\n",oraca.orastxt.orastxtl,oraca.orastxt.orastxtc);
+	printf("on line %d of %.*s\n",oraca.oraslnr,oraca.orasfnm.orasfnml,oraca.orasfnm.orasfnmc);
+	EXEC SQL ROLLBACK RELEASE;
+	clean_communal_data(g_cdata);
+	exit(1);
+}
+
+/********************************************************** 
+Function:		int dbconnect(const char* conn)
+Description:	建立数据库连接
+Input:			const char* conn, 数据库连接字符串
+Output:			无
+Return: 		int 0 成功, 非0表示出错
+Others:			
+**********************************************************/
+int dbconnect(const char* conn)
+{
+
+	EXEC SQL WHENEVER SQLERROR DO sqlerror();
+	EXEC SQL CONNECT :conn;
+	
+	if(sqlca.sqlcode != 0)
+	{
+		printf("Can not connect to database cfg!!\n");
+		return 1;
+	}
+	
+	return 0;
+}
+
+/********************************************************** 
+Function:		void disconnect_database(const char* dbName)
+Description:	断开数据库连接
+Input:			const char* dbName, 数据库名
+				const char* conn, 数据库连接字符串
+Output:			无
+Return: 		int 0 成功, 非0表示出错
+Others:			
+**********************************************************/
+void disconnect_database()
+{
+	EXEC SQL COMMIT WORK RELEASE;
+}
+
+/********************************************************** 
+Function:		int reset_operator_id(const char* program_name, const char* svc_id)
+Description:	复位系统调度
+Input:			const char* program_name, 程序名
+				const char* svc_id, 服务类型
+Output:			无
+Return: 		int 0 成功
+Others:			
+**********************************************************/
+int reset_operator_id(const char* program_name, const char* svc_id)
+{
+	char sql_str[256];
+
+	sprintf(sql_str, "update %s set operator_id='0' where trim(program_name)='%s' and trim(service_id) like '%s%%' and operator_id>'1'", SYS_PROC, program_name, svc_id);
+	
+	EXEC SQL EXECUTE IMMEDIATE :sql_str;
+	EXEC SQL commit;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_sys_proc(ProcessInfo* pinfo, const char* program_name, const char* svc_id, int pcount)
+Description:	获取系统调度
+Input:			const char* program_name, 程序名
+				const char* svc_id, 服务类型
+				int pcount, 限制记录数
+Output:			无
+Return: 		int 记录数
+Others:			
+**********************************************************/
+int get_sys_proc(ProcessInfo* pinfo, const char* program_name, const char* svc_id, int pcount)
+{
+	char sql_str[256], tmp[32], tmp_id[2];
+	int i = 0;
+
+	sprintf(sql_str, "select trim(service_id), trim(operator_id) from %s where trim(program_name)='%s' and trim(service_id) like '%s%%' order by service_id"
+		    , SYS_PROC, program_name, svc_id);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_sys_proc CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_sys_proc;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+
+	while(1)
+	{
+		memset(tmp, 0, sizeof(tmp));
+		EXEC SQL FETCH cur_sys_proc INTO :tmp, :tmp_id;
+		tmp_id[1] = 0;
+		pinfo[i].process_flag = atoi(tmp_id);
+		sprintf(pinfo[i].sub_dir, "%s", tmp);
+		i++;
+
+		if(i >= pcount)
+			break;
+	}
+	EXEC SQL CLOSE cur_sys_proc;
+
+	return i;
+}
+
+/********************************************************** 
+Function:		int get_record_count(const char *sql)
+Description:	获取表的记录数
+Input:			const char* sql, sql语句
+Output:			无
+Return: 		int 非负 记录数, -1表示出错
+Others:			
+**********************************************************/
+int get_record_count(const char *sql)
+{
+	int lcount=0;
+	char sql_str[512];
+
+	sprintf(sql_str, "select count(*) from %s", sql);
+
+	EXEC SQL PREPARE sys_s FROM :sql_str;
+    EXEC SQL DECLARE sys_c CURSOR FOR sys_s;
+    EXEC SQL OPEN sys_c;
+    EXEC SQL WHENEVER NOT FOUND DO break;
+
+	while(1)
+	{
+		EXEC SQL FETCH sys_c INTO :lcount;
+		break;
+	}
+	EXEC SQL CLOSE sys_c;
+
+	return lcount;
+}
+
+/********************************************************** 
+Function:		int get_h1h2h3_size(H1H2H3_CODE_ALLOCATE* h1h2h3_table)
+Description:	获取号段分配表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_h1h2h3_size(H1H2H3_CODE_ALLOCATE* h1h2h3_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by h1h2h3h4", H1H2H3_TABLE);
+
+	/*初始化h1h2h3_table*/
+	memset(h1h2h3_table, 0, sizeof(H1H2H3_CODE_ALLOCATE));
+	h1h2h3_table->record_count = get_record_count(sql_tail);
+	h1h2h3_table->space_size = h1h2h3_table->record_count*sizeof(H1h2h3CodeAllocate);
+
+	return h1h2h3_table->space_size;
+}
+
+/********************************************************** 
+Function:		int init_h1h2h3_code_allocate(H1H2H3_CODE_ALLOCATE* h1h2h3_table, char* start_pos)
+Description:	初始化号段分配表
+Input:			char* start_pos, 共享内存中的起始位置
+Output:			H1H2H3_CODE_ALLOCATE* h1h2h3_code_allocate，指向号段分配表的本地指针
+Return: 		int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_h1h2h3_code_allocate(H1H2H3_CODE_ALLOCATE* h1h2h3_table, char* start_pos)
+{
+	char sql_str[512], tmp[12];
+	H1h2h3CodeAllocate l_h1h2h3;
+	int i, k, len;
+
+	/*进行记录数为0的判断处理*/
+	if(h1h2h3_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	h1h2h3_table->h1h2h3CodeAllocate = (H1h2h3CodeAllocate*)start_pos;
+
+	sprintf(sql_str, "select trim(h1h2h3h4), trim(long_code), trim(type), to_char(change_date,'YYYYMMDDHH24MISS'), \
+	   trim(long_code_new), trim(type_new), to_char(begin_date,'YYYYMMDDHH24MISS'),to_char(end_date,'YYYYMMDDHH24MISS'), \
+		   trim(time_type) from %s order by h1h2h3h4", H1H2H3_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_h1h2h3_code CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_h1h2h3_code;
+
+	for(i = 0; i < h1h2h3_table->record_count; i++)
+	{
+		memset(&l_h1h2h3, 0, sizeof(H1h2h3CodeAllocate));
+		EXEC SQL FETCH cur_h1h2h3_code INTO :l_h1h2h3.h1h2h3h4, :l_h1h2h3.long_code, :l_h1h2h3.type,
+			:l_h1h2h3.change_date, :l_h1h2h3.long_code_new, :l_h1h2h3.type_new, :l_h1h2h3.begin_date,
+			:l_h1h2h3.end_date, :l_h1h2h3.time_type;
+		
+		if (sqlca.sqlcode == 1403) break;
+
+
+		strtrim((h1h2h3_table->h1h2h3CodeAllocate)[i].h1h2h3h4, l_h1h2h3.h1h2h3h4);
+		strtrim((h1h2h3_table->h1h2h3CodeAllocate)[i].long_code, l_h1h2h3.long_code);
+		strtrim((h1h2h3_table->h1h2h3CodeAllocate)[i].change_date, l_h1h2h3.change_date);
+		strtrim((h1h2h3_table->h1h2h3CodeAllocate)[i].long_code_new, l_h1h2h3.long_code_new);
+		strtrim((h1h2h3_table->h1h2h3CodeAllocate)[i].begin_date, l_h1h2h3.begin_date);
+		strtrim((h1h2h3_table->h1h2h3CodeAllocate)[i].end_date, l_h1h2h3.end_date);
+		(h1h2h3_table->h1h2h3CodeAllocate)[i].type = l_h1h2h3.type;
+		(h1h2h3_table->h1h2h3CodeAllocate)[i].type_new = l_h1h2h3.type_new;
+		(h1h2h3_table->h1h2h3CodeAllocate)[i].time_type = l_h1h2h3.time_type;
+
+		len = strlen((h1h2h3_table->h1h2h3CodeAllocate)[i].h1h2h3h4);
+
+		if(memcmp(l_h1h2h3.h1h2h3h4, "13", 2))
+		{
+			/*虚拟号段*/
+			if(len >=7 && l_h1h2h3.h1h2h3h4[0]=='2' && l_h1h2h3.h1h2h3h4[1]=='0' && l_h1h2h3.h1h2h3h4[2]=='0')
+			{
+				memcpy(tmp, l_h1h2h3.h1h2h3h4+3, 4);
+				tmp[4] = 0;
+				h1h2h3_table->virtualH1h2h3[atoi(tmp)] = h1h2h3_table->h1h2h3CodeAllocate + i;
+			}
+			else
+				printf("There is an error h1h2h3h4 in h1h2h3 table -- |%s|.\n", l_h1h2h3.h1h2h3h4);
+
+			continue;
+		}
+
+		/*7位号段*/
+		if(len==7)
+		{
+			for(k = 0; k < 10; k++)
+			{
+				sprintf(tmp, "%-5.5s%d", l_h1h2h3.h1h2h3h4 + 2, k);
+				h1h2h3_table->h1h2h3Cluster[atoi(tmp)] = h1h2h3_table->h1h2h3CodeAllocate + i;
+			}
+		}/*8位号段*/
+		else if(len==8)
+		{
+			strcpy(tmp, (h1h2h3_table->h1h2h3CodeAllocate)[i].h1h2h3h4);
+			tmp[8] = 0;
+			h1h2h3_table->h1h2h3Cluster[atoi(tmp + 2)] = h1h2h3_table->h1h2h3CodeAllocate + i;
+		}
+		else
+			printf("H1h2h3 length error. Ignore -- |%s|\n", l_h1h2h3.h1h2h3h4);
+
+	}
+
+	EXEC SQL CLOSE cur_h1h2h3_code;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_city_size(CITY_LIST* city_table)
+Description:	获取城市列表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_city_size(CITY_LIST* city_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by long_code", CITY_TABLE);
+
+	/*初始化city_table*/
+	memset(city_table, 0, sizeof(CITY_LIST));
+	city_table->record_count = get_record_count(sql_tail);
+	city_table->space_size = city_table->record_count*sizeof(CityList);
+
+	return city_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_city_list(CITY_LIST* city_table, char* start_pos)
+Description:初始化城市区号表
+Input:char* start_pos, 共享内存中的起始位置
+Output:CITY_LIST* city_list，指向城市区号表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_city_list(CITY_LIST* city_table, char* start_pos)
+{
+	char sql_str[512];
+	CityList l_city;
+	int i;
+	
+	/*进行记录数为0的判断处理*/
+	if(city_table->record_count == 0)
+		return 0;
+	
+	/*获得局数据的起始地址*/
+	city_table->cityList = (CityList*)start_pos;
+
+	sprintf(sql_str,"select	trim(long_code), trim(prov_code),\
+ 				trim(loc_code), trim(loc_code_fav),\
+				to_char(change_date,'YYYYMMDDHH24MISS'),\
+				trim(prov_code_new),\
+			 	trim(loc_code_new), trim(loc_code_fav_new),\
+			 	to_char(begin_date,'YYYYMMDDHH24MISS'),\
+				to_char(end_date,'YYYYMMDDHH24MISS'),\
+			 	time_type from %s order by long_code", CITY_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_citycode CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_citycode;
+
+	for(i = 0; i < city_table->record_count; i++)
+	{
+		memset(&l_city, 0, sizeof(CityList));
+		EXEC SQL FETCH cur_citycode INTO :l_city.long_code, :l_city.prov_code,:l_city.loc_code, :l_city.loc_code_fav, \
+			:l_city.change_date, :l_city.prov_code_new, :l_city.loc_code_new, :l_city.loc_code_fav_new,:l_city.begin_date, \
+			:l_city.end_date, :l_city.time_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((city_table->cityList)[i].long_code,l_city.long_code);
+		strtrim((city_table->cityList)[i].prov_code,l_city.prov_code);
+		strtrim((city_table->cityList)[i].loc_code,l_city.loc_code);
+		strtrim((city_table->cityList)[i].loc_code_fav,l_city.loc_code_fav);
+		strtrim((city_table->cityList)[i].change_date,l_city.change_date);
+		strtrim((city_table->cityList)[i].prov_code_new,l_city.prov_code_new);
+		strtrim((city_table->cityList)[i].loc_code_new,l_city.loc_code_new);
+		strtrim((city_table->cityList)[i].loc_code_fav_new,l_city.loc_code_fav_new);
+		strtrim((city_table->cityList)[i].begin_date,l_city.begin_date);
+		strtrim((city_table->cityList)[i].end_date,l_city.end_date);
+		(city_table->cityList)[i].time_type=l_city.time_type;
+
+		city_table->cityCluster[atoi((city_table->cityList)[i].long_code)] = city_table->cityList + i;
+
+	}
+	EXEC SQL CLOSE cur_citycode;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_country_size(COUNTRY_LONG_CODE* country_table)
+Description:	获取country_long_code表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_country_size(COUNTRY_LONG_CODE* country_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by inter_long_code desc", COUNTRY_TABLE);
+
+	/*初始化country_table*/
+	memset(country_table, 0, sizeof(COUNTRY_LONG_CODE));
+	country_table->record_count = get_record_count(sql_tail);
+	country_table->space_size = country_table->record_count * sizeof(CountryLongCode);
+
+	return country_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_country_long_code(COUNTRY_LONG_CODE* country_long_code, char* start_pos)
+Description:初始化国际长途区号表
+Input:char* start_pos, 共享内存中的起始位置
+Output:COUNTRY_LONG_CODE* country_long_code，指向国际长途区号表指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_country_long_code(COUNTRY_LONG_CODE* country_table, char* start_pos)
+{
+	char sql_str[512];
+	CountryLongCode l_country;
+	int i;
+	
+	/*进行记录数为0的判断处理*/
+	if(country_table->record_count == 0)
+		return 0;
+	
+	/*挂接共享内存到当前进程空间*/
+	country_table->countryLongCode = (CountryLongCode*)start_pos;
+
+	sprintf(sql_str,"select	trim(inter_long_code), trim(inter_number),\
+			inter_type, \
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS'),\
+			time_type\
+		 	from %s order by inter_long_code desc", COUNTRY_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_country CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_country;
+
+	for(i = 0; i < country_table->record_count; i++)
+	{
+		memset(&l_country, 0, sizeof(CountryLongCode));
+		EXEC SQL FETCH cur_country INTO :l_country.inter_long_code, :l_country.inter_number, :l_country.inter_type, \
+		:l_country.begin_date,	:l_country.end_date, :l_country.time_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((country_table->countryLongCode)[i].inter_long_code,l_country.inter_long_code);
+		strtrim((country_table->countryLongCode)[i].inter_number,l_country.inter_number);
+		strtrim((country_table->countryLongCode)[i].begin_date,l_country.begin_date);
+		strtrim((country_table->countryLongCode)[i].end_date,l_country.end_date);
+
+		(country_table->countryLongCode)[i].inter_type=l_country.inter_type;
+		(country_table->countryLongCode)[i].time_type=l_country.time_type;
+	}
+	EXEC SQL CLOSE cur_country;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		iint get_rent_size(RENT_H1H2H3* rent_table)
+Description:	获取不同制式号段表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_rent_size(RENT_H1H2H3* rent_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by h1h2h3h4", RENT_TABLE);
+
+	/*初始化rent_table*/
+	memset(rent_table, 0, sizeof(RENT_H1H2H3));
+	rent_table->record_count = get_record_count(sql_tail);
+	rent_table->space_size = rent_table->record_count*sizeof(RentH1h2h3);
+
+	return rent_table->space_size;
+}
+
+
+/********************************************************** 
+Function:int init_rent_h1h2h3(RENT_H1H2H3* rent_table,char* start_pos)
+Description:初始化不同制式号段表
+Input: char* start_pos, 共享内存中的起始位置
+Output:RENT_H1H2H3* rent_h1h2h3，指向不同制式号段的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_rent_h1h2h3(RENT_H1H2H3* rent_table,char* start_pos)
+{
+	char sql_str[512];
+	RentH1h2h3 l_rent;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(rent_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	rent_table->rentH1h2h3 = (RentH1h2h3*)start_pos;
+
+	sprintf(sql_str,"select	trim(h1h2h3h4),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS'),\
+			time_type from %s order by h1h2h3h4", RENT_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_rent CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_rent;
+
+	for(i = 0; i < rent_table->record_count; i++)
+	{
+		memset(&l_rent, 0, sizeof(RentH1h2h3));
+		EXEC SQL FETCH cur_rent INTO :l_rent.h1h2h3h4, :l_rent.begin_date,  :l_rent.end_date, :l_rent.time_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((rent_table->rentH1h2h3)[i].h1h2h3h4,l_rent.h1h2h3h4);
+		strtrim((rent_table->rentH1h2h3)[i].begin_date,l_rent.begin_date);
+		strtrim((rent_table->rentH1h2h3)[i].end_date,l_rent.end_date);
+		(rent_table->rentH1h2h3)[i].time_type=l_rent.time_type;
+
+	}
+	EXEC SQL CLOSE cur_rent;
+
+	return 0;
+}
+
+
+/********************************************************** 
+Function:		int get_msclac_size(MSC_LAC_CODE* msclac_table)
+Description:	获取交接机小区表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_msclac_size(MSC_LAC_CODE* msclac_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by msc_code, lac_code", MSCLAC_TABLE);
+
+	/*初始化 msclac_table*/
+	memset(msclac_table, 0, sizeof(MSC_LAC_CODE));
+	msclac_table->record_count = get_record_count(sql_tail);
+	msclac_table->space_size = msclac_table->record_count*sizeof(MscLacCode);
+
+	return msclac_table->space_size;
+}
+
+
+/********************************************************** 
+Function:int int init_msc_lac_code(MSC_LAC_CODE* msclac_table,char* start_pos)
+Description:初始化交接机小区表
+Input: char* start_pos, 共享内存中的起始位置
+Output:MSC_LAC_CODE* msc_lac_code，指向交接机小区表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_msc_lac_code(MSC_LAC_CODE* msclac_table,char* start_pos)
+{
+	char sql_str[512];
+	MscLacCode l_msclac;
+	int 		i;
+
+	/*进行记录数为0的判断处理*/
+	if(msclac_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	msclac_table->mscLacCode = (MscLacCode*)start_pos;
+
+	sprintf(sql_str,"select	trim(msc_code),trim(lac_code),trim(long_code), to_char(change_date,'YYYYMMDDHH24MISS'),trim(long_code_new), to_char(begin_date,'YYYYMMDDHH24MISS'),to_char(end_date,'YYYYMMDDHH24MISS'), time_type from %s order by msc_code, lac_code", MSCLAC_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_msc CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_msc;
+
+	for(i = 0; i < msclac_table->record_count; i++)
+	{
+		memset(&l_msclac, 0, sizeof(MscLacCode));
+		EXEC SQL FETCH cur_msc INTO :l_msclac.msc_code, :l_msclac.lac_code, :l_msclac.long_code, :l_msclac.change_date, \
+			:l_msclac.long_code_new, :l_msclac.begin_date,  :l_msclac.end_date, :l_msclac.time_type;                                                  
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((msclac_table->mscLacCode)[i].msc_code,l_msclac.msc_code);
+		strtrim((msclac_table->mscLacCode)[i].lac_code,l_msclac.lac_code);
+		strtrim((msclac_table->mscLacCode)[i].long_code,l_msclac.long_code);
+		strtrim((msclac_table->mscLacCode)[i].change_date,l_msclac.change_date);
+		strtrim((msclac_table->mscLacCode)[i].long_code_new,l_msclac.long_code_new);
+		strtrim((msclac_table->mscLacCode)[i].begin_date,l_msclac.begin_date);
+		strtrim((msclac_table->mscLacCode)[i].end_date,l_msclac.end_date);
+		(msclac_table->mscLacCode)[i].time_type=l_msclac.time_type;
+
+	}
+	EXEC SQL CLOSE cur_msc;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_lachome_size(LAC_HOME_CODE* lachome_table)
+Description:	获取小区长途区号表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_lachome_size(LAC_HOME_CODE* lachome_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by lac_code,begin_date", LACHOME_TABLE);
+
+	/*初始化 lachome_table*/
+	memset(lachome_table, 0, sizeof(LAC_HOME_CODE));
+	lachome_table->record_count = get_record_count(sql_tail);
+	lachome_table->space_size = lachome_table->record_count*sizeof(LacHomeCode);
+
+	return lachome_table->space_size;
+}
+
+
+/********************************************************** 
+Function:int int init_lac_home_code(LAC_HOME_CODE* lac_table,char* start_pos)
+Description:初始化小区长途区号表
+Input: char* start_pos, 共享内存中的起始位置
+Output:LAC_HOME_CODE* lac_table，指向小区长途区表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_lac_home_code(LAC_HOME_CODE* lac_table,char* start_pos)
+{
+	char sql_str[512];
+	LacHomeCode l_lac;
+	int 		i;
+
+	/*进行记录数为0的判断处理*/
+	if(lac_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	lac_table->lacHomeCode = (LacHomeCode*)start_pos;
+
+	sprintf(sql_str,"select	trim(lac_code),trim(long_code), to_char(begin_date,'YYYYMMDDHH24MISS'),to_char(end_date,'YYYYMMDDHH24MISS') from %s order by lac_code,begin_date", LACHOME_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_lac CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_lac;
+
+	for(i = 0; i < lac_table->record_count; i++)
+	{
+		memset(&l_lac, 0, sizeof(LacHomeCode));
+		EXEC SQL FETCH cur_lac INTO :l_lac.lac_code, :l_lac.long_code, :l_lac.begin_date,  :l_lac.end_date;                                                  
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((lac_table->lacHomeCode)[i].lac_code,l_lac.lac_code);
+		strtrim((lac_table->lacHomeCode)[i].long_code,l_lac.long_code);
+		strtrim((lac_table->lacHomeCode)[i].begin_date,l_lac.begin_date);
+		strtrim((lac_table->lacHomeCode)[i].end_date,l_lac.end_date);
+
+	}
+	EXEC SQL CLOSE cur_lac;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_duration_size(DURATION_TYPE* duration_table)
+Description:	获取时长类型表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_duration_size(DURATION_TYPE* duration_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by duration_type", DURATION_TABLE);
+
+	/*初始化h1h2h3_table*/
+	memset(duration_table, 0, sizeof(DURATION_TYPE));
+	duration_table->record_count = get_record_count(sql_tail);
+	duration_table->space_size = duration_table->record_count*sizeof(DurationType);
+
+	return duration_table->space_size;
+}
+
+
+
+/********************************************************** 
+Function:int init_duration_type(DURATION_TYPE* duration_type, char* start_pos)
+Description:初始化时长类型表
+Input: char* start_pos, 共享内存中的起始位置
+Output:DURATION_TYPE* duration_type，指向时长类型表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_duration_type(DURATION_TYPE* duration_table,char* start_pos)
+{
+	char sql_str[512];
+	DurationType l_duration;
+	int  i;
+
+	/*进行记录数为0的判断处理*/
+	if(duration_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	duration_table->durationType = (DurationType* )start_pos;
+
+	sprintf(sql_str,"select	begin_duration, end_duration,\
+			duration_type from %s order by duration_type", DURATION_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_duration CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_duration;
+
+	for(i = 0; i < duration_table->record_count; i++)
+	{
+		memset(&l_duration, 0, sizeof(DurationType));
+		EXEC SQL FETCH cur_duration INTO :l_duration.begin_duration, :l_duration.end_duration, :l_duration.duration_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		(duration_table->durationType)[i].begin_duration=l_duration.begin_duration;
+		(duration_table->durationType)[i].end_duration=l_duration.end_duration;
+		(duration_table->durationType)[i].duration_type=l_duration.duration_type;
+
+	}
+	EXEC SQL CLOSE cur_duration;
+
+	return 0;
+}
+
+
+/********************************************************** 
+Function:		int get_boundary_size(BOUNDARY_ROAM* boundary_table)
+Description:	获取省内边界漫游表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_boundary_size(BOUNDARY_ROAM* boundary_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by home_area_code, visit_msc_code, visit_cell_id, begin_date", BOUNDARY_TABLE);
+
+	/*初始化boundary_table*/
+	memset(boundary_table, 0, sizeof(BOUNDARY_ROAM));
+	boundary_table->record_count = get_record_count(sql_tail);
+	boundary_table->space_size = boundary_table->record_count*sizeof(BoundaryRoam);
+
+	return boundary_table->space_size;
+}
+
+
+/********************************************************** 
+Function:int init_boundary_roam(BOUNDARY_ROAM* boundary_roam, char* start_pos)
+Description:初始化省内边界漫游表
+Input:char* start_pos, 共享内存中的起始位置
+Output:BOUNDARY_ROAM* boundary_roam，指向省内边界漫游表的本地指针
+Return:int 0 成功, -1表示出错
+Others:		xuxg 20050709 修改为将visit_cell_id全部转换为大写	
+**********************************************************/
+int init_boundary_roam(BOUNDARY_ROAM* boundary_table,char* start_pos)
+{
+	char sql_str[512];
+	BoundaryRoam l_boundary;
+	int i;
+	
+	/*进行记录数为0的判断处理*/
+	if(boundary_table->record_count == 0)
+		return 0;
+	/*获得局数据的起始地址*/
+	boundary_table->boundaryRoam = (BoundaryRoam* )start_pos;
+
+	sprintf(sql_str,"select	trim(visit_prov_code), trim(visit_msc_code),\
+			 nvl(trim(visit_lac_code),' '),upper(trim(visit_cell_id)),\
+			 trim(home_prov_code),trim(home_area_code),\
+			 nvl(trim(home_msc_code),' '),nvl(trim(home_lac_code),' '),\
+			 nvl(trim(home_cell_id),' '),\
+			 to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			 to_char(end_date,'YYYYMMDDHH24MISS'),\
+			 time_type from %s order by home_area_code, visit_msc_code, upper(visit_cell_id), begin_date", BOUNDARY_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_boun CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_boun;
+
+	for(i = 0; i < boundary_table->record_count; i++)
+	{
+		memset(&l_boundary, 0, sizeof(BoundaryRoam));
+		EXEC SQL FETCH cur_boun INTO :l_boundary.visit_prov_code, :l_boundary.visit_msc_code, :l_boundary.visit_lac_code, :l_boundary.visit_cell_id,:l_boundary.home_prov_code, :l_boundary.home_area_code, :l_boundary.home_msc_code,:l_boundary.home_lac_code, :l_boundary.home_cell_id, :l_boundary.begin_date, :l_boundary.end_date, :l_boundary.time_type;
+ 
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((boundary_table->boundaryRoam)[i].visit_prov_code,l_boundary.visit_prov_code);
+		strtrim((boundary_table->boundaryRoam)[i].visit_msc_code,l_boundary.visit_msc_code);
+		strtrim((boundary_table->boundaryRoam)[i].visit_lac_code,l_boundary.visit_lac_code);
+		strtrim((boundary_table->boundaryRoam)[i].visit_cell_id,l_boundary.visit_cell_id);
+		strtrim((boundary_table->boundaryRoam)[i].home_prov_code,l_boundary.home_prov_code);
+		strtrim((boundary_table->boundaryRoam)[i].home_area_code,l_boundary.home_area_code);
+		strtrim((boundary_table->boundaryRoam)[i].home_msc_code,l_boundary.home_msc_code);
+		strtrim((boundary_table->boundaryRoam)[i].home_lac_code,l_boundary.home_lac_code);
+		strtrim((boundary_table->boundaryRoam)[i].home_cell_id,l_boundary.home_cell_id);
+		strtrim((boundary_table->boundaryRoam)[i].begin_date,l_boundary.begin_date);
+		strtrim((boundary_table->boundaryRoam)[i].end_date,l_boundary.end_date);
+		(boundary_table->boundaryRoam)[i].time_type=l_boundary.time_type;
+
+	}
+	EXEC SQL CLOSE cur_boun;
+
+	return 0;
+}
+
+
+/********************************************************** 
+Function:		int get_area_size(AREA_CODE_INFO* area_table)
+Description:	获取位置编码表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_area_size(AREA_CODE_INFO* area_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by area_code", AREA_TABLE);
+
+	/*初始化area_table*/
+	memset(area_table, 0, sizeof(AREA_CODE_INFO));
+	area_table->record_count = get_record_count(sql_tail);
+	area_table->space_size = area_table->record_count*sizeof(AreaCodeInfo);
+
+	return area_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_area_code_info(AREA_CODE_INFO* area_code_info, char* start_pos)
+Description:初始化位置编码表
+Input:char* start_pos, 共享内存中的起始位置
+Output:AREA_CODE_INFO* area_code_info，指向位置编码表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_area_code_info(AREA_CODE_INFO* area_table, char* start_pos)
+{
+	char sql_str[512];
+	AreaCodeInfo l_area;
+	int i;
+	
+	/*进行记录数为0的判断处理*/
+	if(area_table->record_count == 0)
+		return 0;	
+	
+	/*获得局数据的起始地址*/
+	area_table->areaCodeInfo = (AreaCodeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(area_code), trim(chat_types), trim(home_area_code),trim(visit_area_code), trim(other_home_code), \
+			trim(other_visit_code) from %s order by area_code", AREA_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_area CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_area;
+
+	for(i = 0; i < area_table->record_count; i++)
+	{
+		memset(&l_area, 0, sizeof(AreaCodeInfo));
+		EXEC SQL FETCH cur_area INTO :l_area.area_code, :l_area.chat_types,:l_area.home_area_code, :l_area.visit_area_code,\
+			:l_area.other_home_code,  :l_area.other_visit_code;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((area_table->areaCodeInfo)[i].area_code,l_area.area_code);
+		strtrim((area_table->areaCodeInfo)[i].chat_types,l_area.chat_types);
+		strtrim((area_table->areaCodeInfo)[i].home_area_code,l_area.home_area_code);    
+		strtrim((area_table->areaCodeInfo)[i].visit_area_code,l_area.visit_area_code);  
+		strtrim((area_table->areaCodeInfo)[i].other_home_code,l_area.other_home_code);  
+		strtrim((area_table->areaCodeInfo)[i].other_visit_code,l_area.other_visit_code);
+
+	}
+	EXEC SQL CLOSE cur_area;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_area_snd_size(AREA_CODE_SND* area_snd_table)
+Description:	获取二批位置信息表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_area_snd_size(AREA_CODE_SND* area_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by fav_type", AREASND_TABLE);
+
+	/*初始化area_table*/
+	memset(area_table, 0, sizeof(AREA_CODE_SND));
+	area_table->record_count = get_record_count(sql_tail);
+	area_table->space_size = area_table->record_count*sizeof(AreaCodeSnd);
+
+	return area_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_area_code_snd(AREA_CODE_SND* area_code_snd, char* start_pos)
+Description:初始化二批位置编码表
+Input:char* start_pos, 共享内存中的起始位置
+Output:AREA_CODE_SND* area_code_snd，指向二批位置编码表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+init_area_code_snd(AREA_CODE_SND* area_code_snd, char* start_pos)
+{
+	char sql_str[512];
+	AreaCodeSnd l_area;
+	int i;
+	
+	/*进行记录数为0的判断处理*/
+	if(area_code_snd->record_count == 0)
+		return 0;	
+	
+	/*获得局数据的起始地址*/
+	area_code_snd->areaCodeSnd = (AreaCodeSnd*)start_pos;
+
+	sprintf(sql_str,"select	trim(area_code), trim(fav_type), trim(home_area_code),trim(visit_area_code), trim(other_home_code), trim(other_visit_code) from %s order by fav_type", AREASND_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_area_snd CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_area_snd;
+
+	for(i = 0; i < area_code_snd->record_count; i++)
+	{
+		memset(&l_area, 0, sizeof(AreaCodeSnd));
+		EXEC SQL FETCH cur_area_snd INTO :l_area.area_code, :l_area.fav_type, :l_area.home_area_code, :l_area.visit_area_code,\
+			:l_area.other_home_code,  :l_area.other_visit_code;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((area_code_snd->areaCodeSnd)[i].area_code,l_area.area_code);
+		strtrim((area_code_snd->areaCodeSnd)[i].fav_type, l_area.fav_type);
+		strtrim((area_code_snd->areaCodeSnd)[i].home_area_code,l_area.home_area_code);    
+		strtrim((area_code_snd->areaCodeSnd)[i].visit_area_code,l_area.visit_area_code);  
+		strtrim((area_code_snd->areaCodeSnd)[i].other_home_code,l_area.other_home_code);  
+		strtrim((area_code_snd->areaCodeSnd)[i].other_visit_code,l_area.other_visit_code);
+
+	}
+	EXEC SQL CLOSE cur_area_snd;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_spcode_size(SP_CODE_INFO* spcode_table)
+Description:	获取sp_code_info表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_spcode_size(SP_CODE_INFO* spcode_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by system_type, sp_code, serv_code", SPCODE_TABLE);
+
+	/*初始化 sp_code_info*/
+	memset(spcode_table, 0, sizeof(SP_CODE_INFO));
+	spcode_table->record_count = get_record_count(sql_tail);
+	spcode_table->space_size = spcode_table->record_count*sizeof(SpCodeInfo);
+
+	return spcode_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_sp_code_info(SP_CODE_INFO* spcode_table,char* start_pos)
+Description:初始化sp_code_info表
+Input: char* start_pos, 共享内存中的起始位置
+Output:SP_CODE_INFO* spcode_table，指向sp_code_info表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_sp_code_info(SP_CODE_INFO* spcode_table,char* start_pos)
+{
+	char sql_str[512];
+	SpCodeInfo l_spcode;
+	int 		i;
+
+	/*进行记录数为0的判断处理*/
+	if(spcode_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	spcode_table->spCodeInfo = (SpCodeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(system_type),trim(sp_code),trim(serv_code),to_char(begin_date,'YYYYMMDDHH24MISS'),to_char(end_date,'YYYYMMDDHH24MISS'),check_status from %s order by system_type, sp_code, serv_code", SPCODE_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_sp_code CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_sp_code;
+
+	for(i = 0; i < spcode_table->record_count; i++)
+	{
+		memset(&l_spcode, 0, sizeof(SpCodeInfo));
+		EXEC SQL FETCH cur_sp_code INTO :l_spcode.system_type, :l_spcode.sp_code, :l_spcode.serv_code, \
+			:l_spcode.begin_date,  :l_spcode.end_date, :l_spcode.check_status;                                                  
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((spcode_table->spCodeInfo)[i].system_type,l_spcode.system_type);
+		strtrim((spcode_table->spCodeInfo)[i].sp_code,l_spcode.sp_code);
+		strtrim((spcode_table->spCodeInfo)[i].serv_code,l_spcode.serv_code);
+		(spcode_table->spCodeInfo)[i].check_status = l_spcode.check_status;
+		strtrim((spcode_table->spCodeInfo)[i].begin_date,l_spcode.begin_date);
+		strtrim((spcode_table->spCodeInfo)[i].end_date,l_spcode.end_date);
+
+	}
+	EXEC SQL CLOSE cur_sp_code;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_spoper_size(SP_OPER_CODE* spoper_table)
+Description:	获取sp_oper_code表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_spoper_size(SP_OPER_CODE* spoper_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s where status='0' order by system_type, sp_code, oper_code, billing_type", SPOPER_TABLE);
+
+	/*初始化 sp_oper_code*/
+	memset(spoper_table, 0, sizeof(SP_OPER_CODE));
+	spoper_table->record_count = get_record_count(sql_tail);
+	spoper_table->space_size = spoper_table->record_count*sizeof(SpOperCode);
+
+	return spoper_table->space_size;
+}
+
+/********************************************************** 
+Function:int int init_sp_oper_code(SP_OPER_CODE* spoper_table, char* start_pos)
+Description:初始化sp_oper_code表
+Input: char* start_pos, 内存中的起始位置
+Output:SP_OPER_CODE* spoper_table，指向sp_oper_code表数据的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_sp_oper_code(SP_OPER_CODE* spoper_table, char* start_pos)
+{
+	char sql_str[512];
+	SpOperCode l_spcode;
+	int 		i;
+
+	/*进行记录数为0的判断处理*/
+	if(spoper_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	spoper_table->spOperCode = (SpOperCode*)start_pos;
+
+	sprintf(sql_str,"select trim(system_type),trim(sp_code),trim(oper_code),trim(billing_type), price,to_char(change_date,'YYYYMMDDHH24MISS'),price_new,to_char(begin_date,'YYYYMMDDHH24MISS'),to_char(end_date,'YYYYMMDDHH24MISS') from %s where status='0' order by system_type, sp_code, oper_code, billing_type,begin_date", SPOPER_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_sp_oper CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_sp_oper;
+
+	for(i = 0; i < spoper_table->record_count; i++)
+	{
+		memset(&l_spcode, 0, sizeof(SpOperCode));
+		EXEC SQL FETCH cur_sp_oper INTO :l_spcode.system_type, :l_spcode.sp_code, :l_spcode.oper_code, \
+			:l_spcode.billing_type, :l_spcode.price, :l_spcode.change_date, :l_spcode.price_new, :l_spcode.begin_date, :l_spcode.end_date;                                                  
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((spoper_table->spOperCode)[i].system_type,l_spcode.system_type);
+		strtrim((spoper_table->spOperCode)[i].sp_code,l_spcode.sp_code);
+		strtrim((spoper_table->spOperCode)[i].oper_code,l_spcode.oper_code);
+		/*xuxg 20050523 修改billing_type的问题*/
+		(spoper_table->spOperCode)[i].price =  l_spcode.price;
+		(spoper_table->spOperCode)[i].price_new =  l_spcode.price_new ;
+		strtrim((spoper_table->spOperCode)[i].billing_type,l_spcode.billing_type);
+		strtrim((spoper_table->spOperCode)[i].change_date,l_spcode.change_date);
+		strtrim((spoper_table->spOperCode)[i].begin_date,l_spcode.begin_date);
+		strtrim((spoper_table->spOperCode)[i].end_date,l_spcode.end_date);
+	}
+	EXEC SQL CLOSE cur_sp_oper;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_pstnchat_size(PSTN_CHAT_TYPE* pstn_table)
+Description:	获取座机chat_type表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_pstnchat_size(PSTN_CHAT_TYPE* pstn_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by special_code", PSTNCHAT_TABLE);
+
+	/*初始化 座机chat_type*/
+	memset(pstn_table, 0, sizeof(PSTN_CHAT_TYPE));
+	pstn_table->record_count = get_record_count(sql_tail);
+	pstn_table->space_size = pstn_table->record_count*sizeof(PstnChatType);
+
+	return pstn_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_pstn_chat_type(PSTN_CHAT_TYPE* pstn_table,char* start_pos)
+Description:初始化座机chat_type表
+Input: char* start_pos, 共享内存中的起始位置
+Output:PSTN_CHAT_TYPE* pstn_table，指向座机chat_type表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_pstn_chat_type(PSTN_CHAT_TYPE* pstn_table,char* start_pos)
+{
+	char sql_str[512];
+	PstnChatType l_pstn;
+	int 		i;
+
+	/*进行记录数为0的判断处理*/
+	if(pstn_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	pstn_table->pstnChatType = (PstnChatType*)start_pos;
+
+	sprintf(sql_str,"select	trim(special_code),trim(chat_type) from %s order by special_code", PSTNCHAT_TABLE);
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_pstnc CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_pstnc;
+
+	for(i = 0; i < pstn_table->record_count; i++)
+	{
+		memset(&l_pstn, 0, sizeof(PstnChatType));
+		EXEC SQL FETCH cur_pstnc INTO :l_pstn.special_code, :l_pstn.chat_type;                                                  
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((pstn_table->pstnChatType)[i].special_code,l_pstn.special_code);
+		strtrim((pstn_table->pstnChatType)[i].chat_type,l_pstn.chat_type);
+
+	}
+	EXEC SQL CLOSE cur_pstnc;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_dial_size(DIAL_TYPE_INFO* dial_table)
+Description:	获取拨打类型表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_dial_size(DIAL_TYPE_INFO* dial_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by min_length desc, character_str desc", DIAL_TABLE);
+
+	/*初始化dial_table*/
+	memset(dial_table, 0, sizeof(DIAL_TYPE_INFO));
+	dial_table->record_count = get_record_count(sql_tail);
+	dial_table->space_size = dial_table->record_count*sizeof(DialTypeInfo);
+
+	return dial_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_dial_type_info(DIAL_TYPE_INFO* dial_table,char* start_pos)
+Description:初始化拨打类型表
+Input:char* start_pos, 共享内存中的起始位置
+Output:DIAL_TYPE_INFO* dial_type_info，指向拨打类型表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_dial_type_info(DIAL_TYPE_INFO* dial_table,char* start_pos)
+{
+	char sql_str[512];
+	DialTypeInfo l_dial;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(dial_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	dial_table->dialTypeInfo = (DialTypeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(character_str), chr_length,\
+			 min_length, trim(dial_type),\
+			 to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			 to_char(end_date,'YYYYMMDDHH24MISS')\
+		 	 from %s order by min_length desc, character_str desc", DIAL_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_dial CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_dial;
+
+	for(i = 0; i < dial_table->record_count; i++)
+	{
+		memset(&l_dial, 0, sizeof(DialTypeInfo));
+		EXEC SQL FETCH cur_dial INTO :l_dial.character_str, :l_dial.chr_length, :l_dial.min_length, :l_dial.dial_type, :l_dial.begin_date, :l_dial.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((dial_table->dialTypeInfo)[i].character_str,l_dial.character_str);
+		(dial_table->dialTypeInfo)[i].chr_length=l_dial.chr_length;
+		(dial_table->dialTypeInfo)[i].min_length=l_dial.min_length;
+		strtrim((dial_table->dialTypeInfo)[i].dial_type,l_dial.dial_type);
+		strtrim((dial_table->dialTypeInfo)[i].begin_date,l_dial.begin_date);
+		strtrim((dial_table->dialTypeInfo)[i].end_date,l_dial.end_date);
+
+	}
+	EXEC SQL CLOSE cur_dial;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_chat_size(CHAT_TYPE_INFO* chat_table)
+Description:	获取对端类型表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_chat_size(CHAT_TYPE_INFO* chat_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by order_id, min_length desc, character_str desc", CHAT_TABLE);
+
+	/*初始化chat_table*/
+	memset(chat_table, 0, sizeof(CHAT_TYPE_INFO));
+	chat_table->record_count = get_record_count(sql_tail);
+	chat_table->space_size = chat_table->record_count*sizeof(ChatTypeInfo);
+
+	return chat_table->space_size;
+}
+
+
+/********************************************************** 
+Function:int init_chat_type_info(CHAT_TYPE_INFO* chat_table, char* start_pos)
+Description:初始化对端类型表
+Input:char* start_pos, 共享内存中的起始位置
+Output:CHAT_TYPE_INFO* chat_type_info，指向对端类型表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_chat_type_info(CHAT_TYPE_INFO* chat_table, char* start_pos)
+{
+	char sql_str[512], buf[256];
+	ChatTypeInfo l_chat;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(chat_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	chat_table->chatTypeInfo = (ChatTypeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(character_str), min_length,\
+			trim(call_types), trim(roam_types), \
+			trim(chat_type),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by order_id, min_length desc, character_str desc", CHAT_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_chat CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_chat;
+
+	for(i = 0; i < chat_table->record_count; i++)
+	{
+		memset(&l_chat, 0, sizeof(ChatTypeInfo));
+		EXEC SQL FETCH cur_chat INTO  :l_chat.character_str, :l_chat.min_length, :l_chat.call_types, \
+			:l_chat.roam_types, :l_chat.chat_type, :l_chat.begin_date, :l_chat.end_date;                                                               
+
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim(buf, l_chat.character_str);  
+		(chat_table->chatTypeInfo)[i].min_length=l_chat.min_length;                      
+		strtrim((chat_table->chatTypeInfo)[i].call_types,l_chat.call_types);        
+		strtrim((chat_table->chatTypeInfo)[i].roam_types,l_chat.roam_types);        
+		strtrim((chat_table->chatTypeInfo)[i].chat_type,l_chat.chat_type);          
+		strtrim((chat_table->chatTypeInfo)[i].begin_date,l_chat.begin_date);        
+		strtrim((chat_table->chatTypeInfo)[i].end_date,l_chat.end_date); 
+		
+		strcpy((chat_table->chatTypeInfo)[i].character_str, buf);
+		char_replace(buf, '?', '.');
+
+		if(regcomp(&((chat_table->chatTypeInfo)[i].regex), buf, REG_EXTENDED|REG_NOSUB) != 0)
+		{
+			regfree(&((chat_table->chatTypeInfo)[i].regex));
+			(chat_table->chatTypeInfo)[i].affect_flag = 1;
+			printf("Warning, regex syntax error!! -- |%s|\n", (chat_table->chatTypeInfo)[i].character_str);
+		}
+		else
+			(chat_table->chatTypeInfo)[i].affect_flag = 0;
+
+
+	}
+	EXEC SQL CLOSE cur_chat;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_datecode_size(DATE_CODE_INFO* datecode_table)
+Description:	获取日期编码表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_datecode_size(DATE_CODE_INFO* datecode_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by system_types", DATECODE_TABLE);
+
+	/*初始化datecode_table*/
+	memset(datecode_table, 0, sizeof(DATE_CODE_INFO));
+	datecode_table->record_count = get_record_count(sql_tail);
+	datecode_table->space_size = datecode_table->record_count*sizeof(DateCodeInfo);
+
+	return datecode_table->space_size;
+}
+
+
+/********************************************************** 
+Function:int init_date_code_info(DATE_CODE_INFO* datecode_table, char* start_pos)
+Description:初始化日期编码表
+Input:char* start_pos, 共享内存中的起始位置
+Output:DATE_CODE_INFO* date_code_info，指向日期编码表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_date_code_info(DATE_CODE_INFO* datecode_table, char* start_pos)
+{
+	char sql_str[512];
+	DateCodeInfo l_date;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(datecode_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	datecode_table->dateCodeInfo = (DateCodeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(system_types), trim(conditions),\
+			 trim(date_code),\
+			 to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			 to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	 from %s order by system_types", DATECODE_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_date CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_date;
+
+	for(i = 0; i < datecode_table->record_count; i++)
+	{
+		memset(&l_date, 0, sizeof(DateCodeInfo));
+		EXEC SQL FETCH cur_date INTO :l_date.system_types, :l_date.conditions, :l_date.date_code, \
+			:l_date.begin_date,   :l_date.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((datecode_table->dateCodeInfo)[i].system_types,l_date.system_types);
+		strtrim((datecode_table->dateCodeInfo)[i].conditions,l_date.conditions);
+		strtrim((datecode_table->dateCodeInfo)[i].date_code,l_date.date_code);
+		strtrim((datecode_table->dateCodeInfo)[i].begin_date,l_date.begin_date);
+		strtrim((datecode_table->dateCodeInfo)[i].end_date,l_date.end_date);
+
+	}
+	EXEC SQL CLOSE cur_date;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_feeind_size(FEE_PLAN_INDEX* feeind_table)
+Description:	获取标批费率索引表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_feeind_size(FEE_PLAN_INDEX* feeind_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by item_flag, fee_plan", FEEIND_TABLE);
+
+	/*初始化feeind_table*/
+	memset(feeind_table, 0, sizeof(FEE_PLAN_INDEX));
+	feeind_table->record_count = get_record_count(sql_tail);
+	feeind_table->space_size = feeind_table->record_count*sizeof(FeePlanIndex);
+
+	return feeind_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_fee_plan_index(FEE_PLAN_INDEX* feeind_table, char* start_pos)
+Description:初始化标批费率索引表
+Input:char* start_pos, 共享内存中的起始位置
+Output:FEE_PLAN_INDEX* fee_plan_index，指向标批费率索引表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_fee_plan_index(FEE_PLAN_INDEX* feeind_table, char* start_pos)
+{
+	char sql_str[512];
+	FeePlanIndex l_feeind;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(feeind_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	feeind_table->feePlanIndex = (FeePlanIndex*)start_pos;
+
+	sprintf(sql_str,"select	trim(dial_types), trim(chat_types),\
+			item_flag, trim(fee_plan), \
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by item_flag, fee_plan", FEEIND_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_feeind CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_feeind;
+
+	for(i = 0; i < feeind_table->record_count; i++)
+	{
+		memset(&l_feeind, 0, sizeof(FeePlanIndex));
+		EXEC SQL FETCH cur_feeind INTO :l_feeind.dial_types, :l_feeind.chat_types, :l_feeind.item_flag, \
+			:l_feeind.fee_plan, :l_feeind.begin_date, :l_feeind.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((feeind_table->feePlanIndex)[i].dial_types,l_feeind.dial_types);
+		strtrim((feeind_table->feePlanIndex)[i].chat_types,l_feeind.chat_types);
+		(feeind_table->feePlanIndex)[i].item_flag=l_feeind.item_flag;
+		strtrim((feeind_table->feePlanIndex)[i].fee_plan,l_feeind.fee_plan);
+		strtrim((feeind_table->feePlanIndex)[i].begin_date,l_feeind.begin_date);
+		strtrim((feeind_table->feePlanIndex)[i].end_date,l_feeind.end_date);
+
+	}
+	EXEC SQL CLOSE cur_feeind;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_ifeeind_size(IFEE_PLAN_INDEX* ifeeind_table)
+Description:	获取信息费率索引表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_ifeeind_size(IFEE_PLAN_INDEX* ifeeind_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by character_str desc, fee_plan desc", IFEEIND_TABLE);
+
+	/*初始化ifeeind_table*/
+	memset(ifeeind_table, 0, sizeof(IFEE_PLAN_INDEX));
+	ifeeind_table->record_count = get_record_count(sql_tail);
+	ifeeind_table->space_size = ifeeind_table->record_count*sizeof(IfeePlanIndex);
+
+	return ifeeind_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_ifee_plan_index(IFEE_PLAN_INDEX* ifeeind_table, char* start_pos)
+Description:初始化信息费率索引表
+Input:char* start_pos, 共享内存中的起始位置
+Output:IFEE_PLAN_INDEX* ifee_plan_index，指向信息费率索引表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_ifee_plan_index(IFEE_PLAN_INDEX* ifeeind_table, char* start_pos)
+{
+	char sql_str[512];
+	IfeePlanIndex l_ifeeind;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(ifeeind_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	ifeeind_table->ifeePlanIndex = (IfeePlanIndex*)start_pos;
+
+	sprintf(sql_str,"select	trim(dial_types), trim(chat_types),\
+			trim(character_str), trim(fee_plan), \
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by character_str desc, fee_plan desc", IFEEIND_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_ifeeind CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_ifeeind;
+
+	for(i = 0; i < ifeeind_table->record_count; i++)
+	{
+		memset(&l_ifeeind, 0, sizeof(IfeePlanIndex));
+		EXEC SQL FETCH cur_ifeeind INTO :l_ifeeind.dial_types, :l_ifeeind.chat_types, :l_ifeeind.character_str, \
+			:l_ifeeind.fee_plan, :l_ifeeind.begin_date, :l_ifeeind.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((ifeeind_table->ifeePlanIndex)[i].dial_types,l_ifeeind.dial_types);
+		strtrim((ifeeind_table->ifeePlanIndex)[i].chat_types,l_ifeeind.chat_types);
+		strtrim((ifeeind_table->ifeePlanIndex)[i].character_str,l_ifeeind.character_str);
+		strtrim((ifeeind_table->ifeePlanIndex)[i].fee_plan,l_ifeeind.fee_plan);
+		strtrim((ifeeind_table->ifeePlanIndex)[i].begin_date,l_ifeeind.begin_date);
+		strtrim((ifeeind_table->ifeePlanIndex)[i].end_date,l_ifeeind.end_date);
+
+	}
+	EXEC SQL CLOSE cur_ifeeind;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_feeplan_size(FEE_PLAN_INFO* feeplan_table, const char* table_name)
+Description:	获取标批费率计划表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_feeplan_size(FEE_PLAN_INFO* feeplan_table, const char* table_name)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by fee_plan", table_name);
+
+	/*初始化feeplan_table*/
+	memset(feeplan_table, 0, sizeof(FEE_PLAN_INFO));
+	feeplan_table->record_count = get_record_count(sql_tail);
+	feeplan_table->space_size = feeplan_table->record_count*sizeof(FeePlanInfo);
+
+	return feeplan_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_fee_plan_info(FEE_PLAN_INFO* feeplan_table, const char* table_name, char* start_pos)
+Description:初始化费率计划表
+Input:char* start_pos, 共享内存中的起始位置 const char* table_name 表名
+Output:FEE_PLAN_INFO* fee_plan_info，指向费率计划表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_fee_plan_info(FEE_PLAN_INFO* feeplan_table, const char* table_name, char* start_pos)
+{
+	char sql_str[512];
+	FeePlanInfo l_cfeeplan;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(feeplan_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	feeplan_table->feePlanInfo = (FeePlanInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(fee_plan),trim(system_types),trim(area_codes),\
+			   	trim(date_codes),trim(call_types),\
+				trim(roam_types),trim(fee_types ),\
+			   	trim(user_types),trim(user_brands), fav_flag,min_value,\
+				discount_rate,trim(free_index),max_fee,\
+				trim(deal_type),trim(rate_plan)\
+		 		from %s order by fee_plan", table_name);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_cfeeplan CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_cfeeplan;
+
+	for(i = 0; i < feeplan_table->record_count; i++)
+	{
+		memset(&l_cfeeplan, 0, sizeof(FeePlanInfo));
+		EXEC SQL FETCH cur_cfeeplan INTO :l_cfeeplan.fee_plan, :l_cfeeplan.system_types, :l_cfeeplan.area_codes, :l_cfeeplan.date_codes, 
+			:l_cfeeplan.call_types, :l_cfeeplan.roam_types, :l_cfeeplan.fee_types, :l_cfeeplan.user_types,:l_cfeeplan.user_brands,
+			:l_cfeeplan.fav_flag, :l_cfeeplan.min_value, :l_cfeeplan.discount_rate, :l_cfeeplan.free_index, :l_cfeeplan.max_fee,
+			:l_cfeeplan.deal_type, :l_cfeeplan.rate_plan;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((feeplan_table->feePlanInfo)[i].fee_plan,l_cfeeplan.fee_plan); 
+		strtrim((feeplan_table->feePlanInfo)[i].system_types,l_cfeeplan.system_types);
+		strtrim((feeplan_table->feePlanInfo)[i].area_codes,l_cfeeplan.area_codes);   
+		strtrim((feeplan_table->feePlanInfo)[i].date_codes,l_cfeeplan.date_codes);   
+		strtrim((feeplan_table->feePlanInfo)[i].call_types,l_cfeeplan.call_types);   
+		strtrim((feeplan_table->feePlanInfo)[i].roam_types,l_cfeeplan.roam_types);   
+		strtrim((feeplan_table->feePlanInfo)[i].fee_types,l_cfeeplan.fee_types);   
+		strtrim((feeplan_table->feePlanInfo)[i].user_types,l_cfeeplan.user_types);  
+		strtrim((feeplan_table->feePlanInfo)[i].user_brands,l_cfeeplan.user_brands);
+		(feeplan_table->feePlanInfo)[i].fav_flag = l_cfeeplan.fav_flag;
+		(feeplan_table->feePlanInfo)[i].min_value=l_cfeeplan.min_value;
+		(feeplan_table->feePlanInfo)[i].max_fee=l_cfeeplan.max_fee;
+		(feeplan_table->feePlanInfo)[i].discount_rate=l_cfeeplan.discount_rate;   
+		strtrim((feeplan_table->feePlanInfo)[i].free_index,l_cfeeplan.free_index);   
+		strtrim((feeplan_table->feePlanInfo)[i].deal_type,l_cfeeplan.deal_type);   
+		strtrim((feeplan_table->feePlanInfo)[i].rate_plan,l_cfeeplan.rate_plan);   
+
+	}
+	EXEC SQL CLOSE cur_cfeeplan;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_feerate_size(FEE_RATE_BASE* feerate_table)
+Description:	获取基础费率表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_feerate_size(FEE_RATE_BASE* feerate_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by rate_plan,begin_time,begin_value", FEERATE_TABLE);
+
+	/*初始化feerate_table*/
+	memset(feerate_table, 0, sizeof(FEE_RATE_BASE));
+	feerate_table->record_count = get_record_count(sql_tail);
+	feerate_table->space_size = feerate_table->record_count*sizeof(FeeRateBase);
+
+	return feerate_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_fee_rate_base(FEE_RATE_BASE* feerate_table, char* start_pos)
+Description:初始化基础费率表
+Input:char* start_pos, 共享内存中的起始位置
+Output:FEE_RATE_BASE* fee_rate_base，指向基础费率表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_fee_rate_base(FEE_RATE_BASE* feerate_table, char* start_pos)
+{
+	char sql_str[512];
+	FeeRateBase l_feerate;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(feerate_table->record_count == 0)
+		return 0;
+		
+
+	/*获得局数据的起始地址*/
+	feerate_table->feeRateBase = (FeeRateBase*)start_pos;
+
+
+	sprintf(sql_str,"select trim(rate_plan),trim(begin_time),\
+				trim(end_time),begin_value,\
+		              	end_value, rate_unit,\
+                                fee_rate,\
+			        to_char(change_date,'YYYYMMDDHH24MISS'),\
+				rate_unit_new, fee_rate_new\
+		 		from %s order by rate_plan,begin_time,begin_value", FEERATE_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_feerate CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_feerate;
+
+	for(i = 0; i < feerate_table->record_count; i++)
+	{
+		memset(&l_feerate, 0, sizeof(FeeRateBase));
+		EXEC SQL FETCH cur_feerate INTO :l_feerate.rate_plan, :l_feerate.begin_time, :l_feerate.end_time, \
+			:l_feerate.begin_value,  :l_feerate.end_value, :l_feerate.rate_unit, :l_feerate.fee_rate,  \
+			:l_feerate.change_date,  :l_feerate.rate_unit_new, :l_feerate.fee_rate_new;
+
+		if (sqlca.sqlcode == 1403) break;
+		char_delete(l_feerate.begin_time, ':');
+		char_delete(l_feerate.end_time, ':');
+		strtrim((feerate_table->feeRateBase)[i].rate_plan,l_feerate.rate_plan);
+		strtrim((feerate_table->feeRateBase)[i].begin_time,l_feerate.begin_time);
+		strtrim((feerate_table->feeRateBase)[i].end_time,l_feerate.end_time);
+		(feerate_table->feeRateBase)[i].begin_value=l_feerate.begin_value;
+		(feerate_table->feeRateBase)[i].end_value=l_feerate.end_value;
+		(feerate_table->feeRateBase)[i].rate_unit=l_feerate.rate_unit;
+		(feerate_table->feeRateBase)[i].fee_rate=l_feerate.fee_rate;
+		strtrim((feerate_table->feeRateBase)[i].change_date,l_feerate.change_date);
+		(feerate_table->feeRateBase)[i].rate_unit_new=l_feerate.rate_unit_new;
+		(feerate_table->feeRateBase)[i].fee_rate_new=l_feerate.fee_rate_new;
+
+	}
+	EXEC SQL CLOSE cur_feerate;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_infonum_size(INFO_NUMBER_TABLE* infonum_table)
+Description:	获取信息台编号表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_infonum_size(INFO_NUMBER_TABLE* infonum_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by chat_types, character_str desc", INFONUM_TABLE);
+
+	/*初始化infonum_table*/
+	memset(infonum_table, 0, sizeof(INFO_NUMBER_TABLE));
+	infonum_table->record_count = get_record_count(sql_tail);
+	infonum_table->space_size = infonum_table->record_count*sizeof(InfoNumberTable);
+
+	return infonum_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_info_number_table(INFO_NUMBER_TABLE* infonum_table, char* start_pos)
+Description:初始化信息台编号表
+Input:char* start_pos, 共享内存中的起始位置
+Output:INFO_NUMBER_TABLE* info_number_table，指向信息台编号表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_info_number_table(INFO_NUMBER_TABLE* infonum_table, char* start_pos)
+{
+	char sql_str[512];
+	InfoNumberTable l_infonum;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(infonum_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	infonum_table->infoNumberTable = (InfoNumberTable*)start_pos;
+
+	sprintf(sql_str,"select	trim(chat_types), trim(character_str),\
+			trim(connect_site), trim(info_number)\
+		 	from %s order by chat_types, character_str desc", INFONUM_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_infonum CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_infonum;
+
+	for(i = 0; i < infonum_table->record_count; i++)
+	{
+		memset(&l_infonum, 0, sizeof(InfoNumberTable));
+		EXEC SQL FETCH cur_infonum INTO :l_infonum.chat_type, :l_infonum.character_str, :l_infonum.connect_site, \
+			:l_infonum.info_number;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((infonum_table->infoNumberTable)[i].chat_type,l_infonum.chat_type);
+		strtrim((infonum_table->infoNumberTable)[i].character_str,l_infonum.character_str);
+		strtrim((infonum_table->infoNumberTable)[i].info_number,l_infonum.info_number);
+		strtrim((infonum_table->infoNumberTable)[i].connect_site,l_infonum.connect_site);
+
+	}
+	EXEC SQL CLOSE cur_infonum;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_smstype_size(SMS_TYPE_INFO* smstype_table)
+Description:	获取短信类型表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_smstype_size(SMS_TYPE_INFO* smstype_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by system_type", SMSTYPE_TABLE);
+
+	/*初始化smstype_table*/
+	memset(smstype_table, 0, sizeof(SMS_TYPE_INFO));
+	smstype_table->record_count = get_record_count(sql_tail);
+	smstype_table->space_size = smstype_table->record_count*sizeof(SmsTypeInfo);
+
+	return smstype_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_sms_type_info(SMS_TYPE_INFO* smstype_table, char* start_pos)
+Description:初始化短信类型表
+Input:char* start_pos, 共享内存中的起始位置
+Output:SMS_TYPE_INFO* sms_type_info，指向短信类型表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_sms_type_info(SMS_TYPE_INFO* smstype_table, char* start_pos)
+{
+	char sql_str[512];
+	SmsTypeInfo l_smstype;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(smstype_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	smstype_table->smsTypeInfo = (SmsTypeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(system_type), trim(start_number),\
+			trim(dest_number), trim(sms_type),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by system_type", SMSTYPE_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_smstype CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_smstype;
+
+	for(i = 0; i < smstype_table->record_count; i++)
+	{
+		memset(&l_smstype, 0, sizeof(SmsTypeInfo));
+		EXEC SQL FETCH cur_smstype INTO :l_smstype.system_type, :l_smstype.start_number, :l_smstype.dest_number, \
+			:l_smstype.sms_type, :l_smstype.begin_date, :l_smstype.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((smstype_table->smsTypeInfo)[i].system_type,l_smstype.system_type);
+		strtrim((smstype_table->smsTypeInfo)[i].start_number,l_smstype.start_number);
+		strtrim((smstype_table->smsTypeInfo)[i].dest_number,l_smstype.dest_number);
+		strtrim((smstype_table->smsTypeInfo)[i].sms_type,l_smstype.sms_type);
+		strtrim((smstype_table->smsTypeInfo)[i].begin_date,l_smstype.begin_date);
+		strtrim((smstype_table->smsTypeInfo)[i].end_date,l_smstype.end_date);
+
+	}
+	EXEC SQL CLOSE cur_smstype;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_datafee_size(DATA_FEE_PLAN* datafee_table,const char* table_name)
+Description:	获取数据标批费率表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_datafee_size(DATA_FEE_PLAN* datafee_table,const char* table_name)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by system_type,add_conditions", table_name);
+
+	/*初始化datafee_table*/
+	memset(datafee_table, 0, sizeof(DATA_FEE_PLAN));
+	datafee_table->record_count = get_record_count(sql_tail);
+	datafee_table->space_size = datafee_table->record_count*sizeof(DataFeePlan);
+
+	return datafee_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_data_fee_plan(DATA_FEE_PLAN* data_fee_plan, char* start_pos, const char* table_name)
+Description:初始化数据标批费率表
+Input:char* start_pos, 共享内存中的起始位置
+Output:DATA_FEE_PLAN* data_fee_plan，指向数据标批费率表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_data_fee_plan(DATA_FEE_PLAN* datafee_table, char* start_pos, const char* table_name)
+{
+	char sql_str[512];
+	DataFeePlan l_datafee;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(datafee_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	datafee_table->dataFeePlan = (DataFeePlan*)start_pos;
+
+	sprintf(sql_str,"select	trim(system_type), trim(date_codes),trim(user_types),\
+			trim(user_brands),trim(add_conditions),to_char(begin_date,'YYYYMMDDHH24MISS'), \
+			to_char(end_date  ,'YYYYMMDDHH24MISS'),	fav_flag, min_value,discount_rate, \
+			trim(free_index),max_fee, trim(deal_type),trim(rate_plan)\
+		 	from %s order by system_type,add_conditions", table_name);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_datafee CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_datafee;
+
+	for(i = 0; i < datafee_table->record_count; i++)
+	{
+		memset(&l_datafee, 0, sizeof(DataFeePlan));
+		EXEC SQL FETCH cur_datafee INTO :l_datafee.system_type, :l_datafee.date_codes, :l_datafee.user_types, :l_datafee.user_brands,
+			:l_datafee.add_conditions, :l_datafee.begin_date, :l_datafee.end_date, :l_datafee.fav_flag, :l_datafee.min_value, 
+			:l_datafee.discount_rate, :l_datafee.free_index, :l_datafee.max_fee, :l_datafee.deal_type, :l_datafee.rate_plan;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((datafee_table->dataFeePlan)[i].system_type,l_datafee.system_type); 
+		strtrim((datafee_table->dataFeePlan)[i].date_codes,l_datafee.date_codes); 
+		strtrim((datafee_table->dataFeePlan)[i].user_types,l_datafee.user_types); 
+		strtrim((datafee_table->dataFeePlan)[i].user_types,l_datafee.user_brands);
+		strtrim((datafee_table->dataFeePlan)[i].add_conditions,l_datafee.add_conditions); 
+		strtrim((datafee_table->dataFeePlan)[i].begin_date,l_datafee.begin_date); 
+		strtrim((datafee_table->dataFeePlan)[i].end_date,l_datafee.end_date);
+		(datafee_table->dataFeePlan)[i].fav_flag=l_datafee.fav_flag;
+		(datafee_table->dataFeePlan)[i].min_value=l_datafee.min_value; 
+		(datafee_table->dataFeePlan)[i].max_fee=l_datafee.max_fee;
+		(datafee_table->dataFeePlan)[i].discount_rate=l_datafee.discount_rate;
+		strtrim((datafee_table->dataFeePlan)[i].deal_type,l_datafee.deal_type); 
+		strtrim((datafee_table->dataFeePlan)[i].free_index,l_datafee.free_index); 
+		strtrim((datafee_table->dataFeePlan)[i].rate_plan,l_datafee.rate_plan); 
+
+	}
+	EXEC SQL CLOSE cur_datafee;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_account_size(ACCOUNT_ID_INFO* account_table)
+Description:	获取账号信息表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_account_size(ACCOUNT_ID_INFO* account_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by system_type, add_conditions", ACCOUNT_TABLE);
+
+	/*初始化account_table*/
+	memset(account_table, 0, sizeof(ACCOUNT_ID_INFO));
+	account_table->record_count = get_record_count(sql_tail);
+	account_table->space_size = account_table->record_count*sizeof(AccountIdInfo);
+
+	return account_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_account_id_info(ACCOUNT_ID_INFO* account_table, char* start_pos)
+Description:初始化账号信息表
+Input:char* start_pos, 共享内存中的起始位置
+Output:ACCOUNT_ID_INFO* account_id_info，指向账号信息表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_account_id_info(ACCOUNT_ID_INFO* account_table, char* start_pos)
+{
+	char sql_str[512];
+	AccountIdInfo l_account;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(account_table->record_count == 0)
+		return 0;
+	
+	/*获得局数据的起始地址*/
+	account_table->accountIdInfo = (AccountIdInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(system_type), trim(account_id),\
+			trim(add_conditions), trim(long_code),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by system_type, add_conditions", ACCOUNT_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_account CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_account;
+
+	for(i = 0; i < account_table->record_count; i++)
+	{
+		memset(&l_account, 0, sizeof(AccountIdInfo));
+		EXEC SQL FETCH cur_account INTO :l_account.system_type, :l_account.account_id, :l_account.add_conditions, \
+			:l_account.long_code, :l_account.begin_date, :l_account.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((account_table->accountIdInfo)[i].system_type,l_account.system_type);
+		strtrim((account_table->accountIdInfo)[i].account_id,l_account.account_id);
+		strtrim((account_table->accountIdInfo)[i].add_conditions,l_account.add_conditions);
+		strtrim((account_table->accountIdInfo)[i].long_code,l_account.long_code);
+		strtrim((account_table->accountIdInfo)[i].begin_date,l_account.begin_date);
+		strtrim((account_table->accountIdInfo)[i].end_date,l_account.end_date);
+
+	}
+	EXEC SQL CLOSE cur_account;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_favind_size(FAV_INDEX* favind_table)
+Description:	获取套餐信息总表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_favind_size(FAV_INDEX* favind_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by fav_type", FAVIND_TABLE);
+
+	/*初始化favind_table*/
+	memset(favind_table, 0, sizeof(FAV_INDEX));
+	favind_table->record_count = get_record_count(sql_tail);
+	favind_table->space_size = favind_table->record_count*sizeof(FavIndex);
+
+	return favind_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_fav_index(FAV_INDEX* favind_table, char* start_pos)
+Description:初始化套餐信息总表
+Input:char* start_pos, 共享内存中的起始位置
+Output:FAV_INDEX* fav_index，指向套餐信息总表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_fav_index(FAV_INDEX* favind_table, char* start_pos)
+{
+	char sql_str[512];
+	FavIndex l_favind;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(favind_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	favind_table->favIndex = (FavIndex*)start_pos;
+
+	sprintf(sql_str,"select	trim(fav_type), fav_class, fav_level, trim(fav_plan),\
+			trim(affect_service),discount_order,\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS'),time_type\
+		 	from %s order by fav_type", FAVIND_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_favind CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_favind;
+
+	for(i = 0; i < favind_table->record_count; i++)
+	{
+		memset(&l_favind, 0, sizeof(FavIndex));
+		EXEC SQL FETCH cur_favind INTO :l_favind.fav_type, :l_favind.fav_class, :l_favind.fav_level,:l_favind.fav_plan,\
+			:l_favind.affect_service, :l_favind.discount_order, :l_favind.begin_date, :l_favind.end_date, :l_favind.time_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((favind_table->favIndex)[i].fav_type,l_favind.fav_type);
+		strtrim((favind_table->favIndex)[i].affect_service,l_favind.affect_service);
+		strtrim((favind_table->favIndex)[i].fav_plan,l_favind.fav_plan);
+		(favind_table->favIndex)[i].fav_class = l_favind.fav_class;
+		(favind_table->favIndex)[i].fav_level = l_favind.fav_level;
+		(favind_table->favIndex)[i].discount_order=l_favind.discount_order;
+		strtrim((favind_table->favIndex)[i].begin_date,l_favind.begin_date);
+		strtrim((favind_table->favIndex)[i].end_date,l_favind.end_date);
+		(favind_table->favIndex)[i].time_type = l_favind.time_type;
+
+	}
+	EXEC SQL CLOSE cur_favind;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_datesnd_size(DATE_CODE_SND* datesnd_table)
+Description:	获取二批日期编码表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_datesnd_size(DATE_CODE_SND* datesnd_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by fav_type,begin_date,begin_time", DATESND_TABLE);
+
+	/*初始化datesnd_table*/
+	memset(datesnd_table, 0, sizeof(DATE_CODE_SND));
+	datesnd_table->record_count = get_record_count(sql_tail);
+	datesnd_table->space_size = datesnd_table->record_count*sizeof(DateCodeSnd);
+
+	return datesnd_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_date_code_snd(DATE_CODE_SND* datesnd_table, char* start_pos)
+Description:初始化二批日期编码表
+Input:char* start_pos, 共享内存中的起始位置
+Output:DATE_CODE_SND* date_code_snd，指向二批日期编码表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_date_code_snd(DATE_CODE_SND* datesnd_table, char* start_pos)
+{
+	char sql_str[512];
+	DateCodeSnd l_datesnd;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(datesnd_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	datesnd_table->dateCodeSnd = (DateCodeSnd*)start_pos;
+
+	sprintf(sql_str,"select	trim(date_code), trim(fav_type),\
+			trim(begin_date), trim(begin_time),\
+			trim(end_date), trim(end_time)\
+		 	from %s order by fav_type,begin_date,begin_time", DATESND_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_datesnd CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_datesnd;
+
+	for(i = 0; i < datesnd_table->record_count; i++)
+	{
+		memset(&l_datesnd, 0, sizeof(DateCodeSnd));
+		EXEC SQL FETCH cur_datesnd INTO :l_datesnd.date_code, :l_datesnd.fav_type, :l_datesnd.begin_date, \
+			:l_datesnd.begin_time, :l_datesnd.end_date, :l_datesnd.end_time;
+
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((datesnd_table->dateCodeSnd)[i].date_code,l_datesnd.date_code);
+		strtrim((datesnd_table->dateCodeSnd)[i].fav_type,l_datesnd.fav_type);
+		strtrim((datesnd_table->dateCodeSnd)[i].begin_date,l_datesnd.begin_date);
+		strtrim((datesnd_table->dateCodeSnd)[i].begin_time,l_datesnd.begin_time);
+		strtrim((datesnd_table->dateCodeSnd)[i].end_date,l_datesnd.end_date);
+		strtrim((datesnd_table->dateCodeSnd)[i].end_time,l_datesnd.end_time);
+
+	}
+	EXEC SQL CLOSE cur_datesnd;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_location_size(LOCATION_CODE_INFO* location_table)
+Description:	获取小区信息表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_location_size(LOCATION_CODE_INFO* location_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by flag_code, msc_code, cell_id", LOCATION_TABLE);
+
+	/*初始化location_table*/
+	memset(location_table, 0, sizeof(LOCATION_CODE_INFO));
+	location_table->record_count = get_record_count(sql_tail);
+	location_table->space_size = location_table->record_count*sizeof(LocationCodeInfo);
+
+	return location_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_location_code_info(LOCATION_CODE_INFO* location_table, char* start_pos)
+Description:初始化小区信息表
+Input:char* start_pos, 共享内存中的起始位置
+Output:LOCATION_CODE_INFO* location_code_info，指向小区信息表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_location_code_info(LOCATION_CODE_INFO* location_table, char* start_pos)
+{
+	char sql_str[512];
+	LocationCodeInfo l_location;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(location_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	location_table->locationCodeInfo = (LocationCodeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(location_code), trim(flag_code),\
+			trim(msc_code), trim(cell_id), \
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by flag_code, msc_code, cell_id", LOCATION_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_location CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_location;
+
+	for(i = 0; i < location_table->record_count; i++)
+	{
+		memset(&l_location, 0, sizeof(LocationCodeInfo));
+		EXEC SQL FETCH cur_location INTO :l_location.location_code, :l_location.flag_code, :l_location.msc_code,\
+			:l_location.cell_id, :l_location.begin_date, :l_location.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((location_table->locationCodeInfo)[i].location_code,l_location.location_code);
+		strtrim((location_table->locationCodeInfo)[i].flag_code,l_location.flag_code);
+		strtrim((location_table->locationCodeInfo)[i].msc_code,l_location.msc_code);
+		strtrim((location_table->locationCodeInfo)[i].cell_id,l_location.cell_id);
+		strtrim((location_table->locationCodeInfo)[i].begin_date,l_location.begin_date);
+		strtrim((location_table->locationCodeInfo)[i].end_date,l_location.end_date);
+
+	}
+	EXEC SQL CLOSE cur_location;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_vpmncode_size(VPMN_CODE_INFO* vpmncode_table)
+Description:	获取集团编号表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_vpmncode_size(VPMN_CODE_INFO* vpmncode_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by vpmn_code ", VPMNCODE_TABLE);
+
+	/*初始化vpmncode_table*/
+	memset(vpmncode_table, 0, sizeof(VPMN_CODE_INFO));
+	vpmncode_table->record_count = get_record_count(sql_tail);
+	vpmncode_table->space_size = vpmncode_table->record_count*sizeof(VpmnCodeInfo);
+
+	return vpmncode_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_vpmn_code_info(VPMN_CODE_INFO* vpmncode_table, char* start_pos)
+Description:初始化集团编号表
+Input:char* start_pos, 共享内存中的起始位置
+Output:VPMN_CODE_INFO* vpmn_code_info，指向集团编号表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_vpmn_code_info(VPMN_CODE_INFO* vpmncode_table, char* start_pos)
+{
+	char sql_str[512];
+	VpmnCodeInfo l_vpmncode;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(vpmncode_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	vpmncode_table->vpmnCodeInfo = (VpmnCodeInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(vpmn_code), trim(vpmn_no),\
+			trim(vpmn_others), \
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by vpmn_code ", VPMNCODE_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_vpmncode CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_vpmncode;
+
+	for(i = 0; i < vpmncode_table->record_count; i++)
+	{
+		memset(&l_vpmncode, 0, sizeof(VpmnCodeInfo));
+		EXEC SQL FETCH cur_vpmncode INTO :l_vpmncode.vpmn_code, :l_vpmncode.vpmn_no, :l_vpmncode.vpmn_others, \
+			:l_vpmncode.begin_date,:l_vpmncode.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((vpmncode_table->vpmnCodeInfo)[i].vpmn_code,l_vpmncode.vpmn_code);
+		strtrim((vpmncode_table->vpmnCodeInfo)[i].vpmn_no,l_vpmncode.vpmn_no);
+		strtrim((vpmncode_table->vpmnCodeInfo)[i].vpmn_others,l_vpmncode.vpmn_others);
+		strtrim((vpmncode_table->vpmnCodeInfo)[i].begin_date,l_vpmncode.begin_date);
+		strtrim((vpmncode_table->vpmnCodeInfo)[i].end_date,l_vpmncode.end_date);
+
+	}
+	EXEC SQL CLOSE cur_vpmncode;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_voicefav_size(VOICEFAV_FEE_PLAN* voicefav_table,const char* table)
+Description:	获取语音优惠费率表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_voicefav_size(VOICEFAV_FEE_PLAN* voicefav_table,const char* table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by fav_plan", table);
+
+	/*初始化voicefav_table*/
+	memset(voicefav_table, 0, sizeof(VOICEFAV_FEE_PLAN));
+	voicefav_table->record_count = get_record_count(sql_tail);
+	voicefav_table->space_size = voicefav_table->record_count*sizeof(VoicefavFeePlan);
+
+	return voicefav_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_voicefav_fee_plan(VOICEFAV_FEE_PLAN* voicefav_table, char* start_pos, const char* table)
+Description:初始化语音优惠费率表
+Input:char* start_pos, 共享内存中的起始位置
+Output:VOICEFAV_FEE_PLAN* voicefav_fee_plan，指向语音优惠费率表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_voicefav_fee_plan(VOICEFAV_FEE_PLAN* voicefav_table, char* start_pos, const char* table)
+{
+	char sql_str[512];
+	VoicefavFeePlan l_voice;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(voicefav_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	voicefav_table->voicefavFeePlan = (VoicefavFeePlan*)start_pos;
+
+	sprintf(sql_str,"select	trim(fav_plan),trim(system_types),trim(user_brands),\
+				trim(other_brands), trim(area_codes),\
+				trim(location_codes),trim(vpmn_codes),\
+				trim(relation_codes),trim(date_codes),\
+				trim(call_types), trim(roam_types),\
+				trim(dial_types), trim(chat_types),\
+				trim(fee_types),  trim(user_types),\
+				min_value,discount_rate,\
+				trim(free_type),trim(free_index),\
+				trim(relation_index),trim(free_plan),\
+				trim(deal_type),trim(rate_plan)\
+		 		from %s order by fav_plan", table);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_voice CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_voice;
+
+	for(i = 0; i < voicefav_table->record_count; i++)
+	{
+		memset(&l_voice, 0, sizeof(VoicefavFeePlan));
+		EXEC SQL FETCH cur_voice INTO :l_voice.fav_plan, :l_voice.system_types, :l_voice.user_brands, :l_voice.other_brands, 
+			:l_voice.area_codes, :l_voice.location_codes, :l_voice.vpmn_codes,	:l_voice.relation_codes,  
+			:l_voice.date_codes, :l_voice.call_types, :l_voice.roam_types, :l_voice.dial_types,	:l_voice.chat_types, 
+			:l_voice.fee_types,	:l_voice.user_types, :l_voice.fpResult.min_value, :l_voice.fpResult.discount_rate, :l_voice.fpResult.free_type, 
+			:l_voice.fpResult.free_index, :l_voice.fpResult.relation_index, :l_voice.fpResult.free_plan, :l_voice.fpResult.deal_type, :l_voice.fpResult.rate_plan;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((voicefav_table->voicefavFeePlan)[i].fav_plan,l_voice.fav_plan);
+		strtrim((voicefav_table->voicefavFeePlan)[i].system_types,l_voice.system_types);
+		strtrim((voicefav_table->voicefavFeePlan)[i].user_brands,l_voice.user_brands);
+		strtrim((voicefav_table->voicefavFeePlan)[i].other_brands,l_voice.other_brands);
+		strtrim((voicefav_table->voicefavFeePlan)[i].area_codes,l_voice.area_codes);
+		strtrim((voicefav_table->voicefavFeePlan)[i].location_codes,l_voice.location_codes);
+		strtrim((voicefav_table->voicefavFeePlan)[i].vpmn_codes,l_voice.vpmn_codes);
+		strtrim((voicefav_table->voicefavFeePlan)[i].relation_codes,l_voice.relation_codes);
+		strtrim((voicefav_table->voicefavFeePlan)[i].date_codes,l_voice.date_codes);
+		strtrim((voicefav_table->voicefavFeePlan)[i].call_types,l_voice.call_types);
+		strtrim((voicefav_table->voicefavFeePlan)[i].roam_types,l_voice.roam_types);
+		strtrim((voicefav_table->voicefavFeePlan)[i].dial_types,l_voice.dial_types);
+		strtrim((voicefav_table->voicefavFeePlan)[i].chat_types,l_voice.chat_types);
+		strtrim((voicefav_table->voicefavFeePlan)[i].fee_types,l_voice.fee_types);
+		strtrim((voicefav_table->voicefavFeePlan)[i].user_types,l_voice.user_types);
+		(voicefav_table->voicefavFeePlan)[i].fpResult.min_value=l_voice.fpResult.min_value;
+		(voicefav_table->voicefavFeePlan)[i].fpResult.discount_rate=l_voice.fpResult.discount_rate;
+		strtrim((voicefav_table->voicefavFeePlan)[i].fpResult.free_type,l_voice.fpResult.free_type);
+		strtrim((voicefav_table->voicefavFeePlan)[i].fpResult.free_index,l_voice.fpResult.free_index);
+		strtrim((voicefav_table->voicefavFeePlan)[i].fpResult.relation_index,l_voice.fpResult.relation_index);
+		strtrim((voicefav_table->voicefavFeePlan)[i].fpResult.free_plan,l_voice.fpResult.free_plan);
+		strtrim((voicefav_table->voicefavFeePlan)[i].fpResult.deal_type,l_voice.fpResult.deal_type);
+		strtrim((voicefav_table->voicefavFeePlan)[i].fpResult.rate_plan,l_voice.fpResult.rate_plan);
+
+	}
+	EXEC SQL CLOSE cur_voice;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_datafav_size(DATAFAV_FEE_PLAN* datafav_table)
+Description:	获取数据优惠费率表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_datafav_size(DATAFAV_FEE_PLAN* datafav_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by fav_plan,system_type,add_conditions", DATAFAV_TABLE);
+
+	/*初始化datafav_table*/
+	memset(datafav_table, 0, sizeof(DATAFAV_FEE_PLAN));
+	datafav_table->record_count = get_record_count(sql_tail);
+	datafav_table->space_size = datafav_table->record_count*sizeof(DatafavFeePlan);
+
+	return datafav_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_datafav_fee_plan(DATAFAV_FEE_PLAN* datafav_table, char* start_pos)
+Description:初始化数据优惠费率表
+Input:char* start_pos, 共享内存中的起始位置
+Output:DATAFAV_FEE_PLAN* datafav_fee_plan，指向数据优惠费率表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_datafav_fee_plan(DATAFAV_FEE_PLAN* datafav_table, char* start_pos)
+{
+	char sql_str[512];
+	DatafavFeePlan l_datafav;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(datafav_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	datafav_table->datafavFeePlan = (DatafavFeePlan*)start_pos;
+
+	sprintf(sql_str,"select	trim(fav_plan),trim(system_type),trim(user_brands),\
+			 trim(other_brands), trim(vpmn_codes),\
+			 trim(relation_codes), trim(date_codes),\
+			 trim(add_conditions), trim(user_types ),\
+			 min_value,discount_rate,\
+			 trim(free_type), trim(free_index),\
+			 trim(relation_index),trim(free_plan),\
+			 trim(deal_type),trim(rate_plan)\
+		 	 from %s order by fav_plan,system_type,add_conditions", DATAFAV_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_datafav CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_datafav;
+
+	for(i = 0; i < datafav_table->record_count; i++)
+	{
+		memset(&l_datafav, 0, sizeof(DatafavFeePlan));
+		EXEC SQL FETCH cur_datafav INTO :l_datafav.fav_plan, :l_datafav.system_type, :l_datafav.user_brands, :l_datafav.other_brands, 
+			:l_datafav.vpmn_codes, :l_datafav.relation_codes, :l_datafav.date_codes, :l_datafav.add_conditions,	
+			:l_datafav.user_types, :l_datafav.fpResult.min_value, :l_datafav.fpResult.discount_rate, :l_datafav.fpResult.free_type, 
+			:l_datafav.fpResult.free_index, :l_datafav.fpResult.relation_index, :l_datafav.fpResult.free_plan, :l_datafav.fpResult.deal_type, :l_datafav.fpResult.rate_plan;
+
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((datafav_table->datafavFeePlan)[i].fav_plan,l_datafav.fav_plan);
+		strtrim((datafav_table->datafavFeePlan)[i].system_type,l_datafav.system_type);
+		strtrim((datafav_table->datafavFeePlan)[i].user_brands,l_datafav.user_brands);
+		strtrim((datafav_table->datafavFeePlan)[i].other_brands,l_datafav.other_brands);
+		strtrim((datafav_table->datafavFeePlan)[i].vpmn_codes,l_datafav.vpmn_codes);
+		strtrim((datafav_table->datafavFeePlan)[i].relation_codes,l_datafav.relation_codes);
+		strtrim((datafav_table->datafavFeePlan)[i].date_codes,l_datafav.date_codes);
+		strtrim((datafav_table->datafavFeePlan)[i].add_conditions,l_datafav.add_conditions);
+		strtrim((datafav_table->datafavFeePlan)[i].user_types,l_datafav.user_types);
+		(datafav_table->datafavFeePlan)[i].fpResult.min_value=l_datafav.fpResult.min_value;
+		(datafav_table->datafavFeePlan)[i].fpResult.discount_rate=l_datafav.fpResult.discount_rate;
+		strtrim((datafav_table->datafavFeePlan)[i].fpResult.free_type,l_datafav.fpResult.free_type);
+		strtrim((datafav_table->datafavFeePlan)[i].fpResult.free_index,l_datafav.fpResult.free_index);
+		strtrim((datafav_table->datafavFeePlan)[i].fpResult.relation_index,l_datafav.fpResult.relation_index);
+		strtrim((datafav_table->datafavFeePlan)[i].fpResult.free_plan,l_datafav.fpResult.free_plan);
+		strtrim((datafav_table->datafavFeePlan)[i].fpResult.deal_type,l_datafav.fpResult.deal_type);
+		strtrim((datafav_table->datafavFeePlan)[i].fpResult.rate_plan,l_datafav.fpResult.rate_plan);
+
+	}
+	EXEC SQL CLOSE cur_datafav;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_freerate_size(FREE_RATE_BASE* freerate_table)
+Description:	获取赠送信息表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_freerate_size(FREE_RATE_BASE* freerate_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by free_plan", FREERATE_TABLE);
+
+	/*初始化freerate_table*/
+	memset(freerate_table, 0, sizeof(FREE_RATE_BASE));
+	freerate_table->record_count = get_record_count(sql_tail);
+	freerate_table->space_size = freerate_table->record_count*sizeof(FreeRateBase);
+
+	return freerate_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_free_rate_base(FREE_RATE_BASE* freerate_table, char* start_pos)
+Description:初始化赠送信息表
+Input:char* start_pos, 共享内存中的起始位置
+Output:FREE_RATE_BASE* free_rate_base，指向赠送信息表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_free_rate_base(FREE_RATE_BASE* freerate_table, char* start_pos)
+{
+	char sql_str[512];
+	FreeRateBase l_freerate;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(freerate_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	freerate_table->freeRateBase = (FreeRateBase*)start_pos;
+
+	sprintf(sql_str,"select	trim(free_plan), start_value,\
+			end_value,free_unit, free_modulus, \
+			free_value,to_char(change_date,'YYYYMMDDHH24MISS'),\
+			free_value_new\
+		 	from %s order by free_plan", FREERATE_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_freerate CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_freerate;
+
+	for(i = 0; i < freerate_table->record_count; i++)
+	{
+		memset(&l_freerate, 0, sizeof(FreeRateBase));
+		EXEC SQL FETCH cur_freerate INTO :l_freerate.free_plan, :l_freerate.start_value, :l_freerate.end_value, \
+			:l_freerate.free_unit, :l_freerate.free_modulus, :l_freerate.free_value, :l_freerate.change_date, :l_freerate.free_value_new;
+
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((freerate_table->freeRateBase)[i].free_plan,l_freerate.free_plan);
+		(freerate_table->freeRateBase)[i].start_value=l_freerate.start_value;
+		(freerate_table->freeRateBase)[i].end_value=l_freerate.end_value;
+		(freerate_table->freeRateBase)[i].free_unit=l_freerate.free_unit;
+		(freerate_table->freeRateBase)[i].free_modulus=l_freerate.free_modulus;
+		(freerate_table->freeRateBase)[i].free_value=l_freerate.free_value;
+		strtrim((freerate_table->freeRateBase)[i].change_date,l_freerate.change_date);
+		(freerate_table->freeRateBase)[i].free_value_new=l_freerate.free_value_new;
+
+	}
+	EXEC SQL CLOSE cur_freerate;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_vpmnphone_size(VPMN_PHONE_PREFIX* vpmnprefix_table)
+Description:	获取集团固定局向表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_vpmnphone_size(VPMN_PHONE_PREFIX* vpmnprefix_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by phone_prefix", VPMNPHONE_TABLE);
+
+	/*初始化vpmnprefix_table*/
+	memset(vpmnprefix_table, 0, sizeof(VPMN_PHONE_PREFIX));
+	vpmnprefix_table->record_count = get_record_count(sql_tail);
+	vpmnprefix_table->space_size = vpmnprefix_table->record_count*sizeof(VpmnPhonePrefix);
+
+	return vpmnprefix_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_vpmn_phone_prefix(VPMN_PHONE_PREFIX* vpmnprefix_table, char* start_pos)
+Description:初始化固定局向表
+Input:char* start_pos, 共享内存中的起始位置
+Output:VPMN_PHONE_PREFIX* vpmn_phone_prefix，指向固定局向表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_vpmn_phone_prefix(VPMN_PHONE_PREFIX* vpmnprefix_table, char* start_pos)
+{
+	char sql_str[512];
+	VpmnPhonePrefix l_vpmnprefix;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(vpmnprefix_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	vpmnprefix_table->vpmnPhonePrefix = (VpmnPhonePrefix*)start_pos;
+
+	sprintf(sql_str,"select	trim(phone_prefix), trim(vpmn_number),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by phone_prefix", VPMNPHONE_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_vpmnphone CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_vpmnphone;
+
+	for(i = 0; i < vpmnprefix_table->record_count; i++)
+	{
+		memset(&l_vpmnprefix, 0, sizeof(VpmnPhonePrefix));
+		EXEC SQL FETCH cur_vpmnphone INTO :l_vpmnprefix.phone_prefix, :l_vpmnprefix.vpmn_number, :l_vpmnprefix.begin_date, \
+			:l_vpmnprefix.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((vpmnprefix_table->vpmnPhonePrefix)[i].phone_prefix,l_vpmnprefix.phone_prefix);
+		strtrim((vpmnprefix_table->vpmnPhonePrefix)[i].vpmn_number,l_vpmnprefix.vpmn_number);
+		strtrim((vpmnprefix_table->vpmnPhonePrefix)[i].begin_date,l_vpmnprefix.begin_date);
+		strtrim((vpmnprefix_table->vpmnPhonePrefix)[i].end_date,l_vpmnprefix.end_date);
+
+	}
+	EXEC SQL CLOSE cur_vpmnphone;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_testcard_size(TEST_CARD_INFO* testcard_table)
+Description:	获取测试卡表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_testcard_size(TEST_CARD_INFO* testcard_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by msisdn", TESTCARD_TABLE);
+
+	/*初始化testcard_table*/
+	memset(testcard_table, 0, sizeof(TEST_CARD_INFO));
+	testcard_table->record_count = get_record_count(sql_tail);
+	testcard_table->space_size = testcard_table->record_count*sizeof(TestCardInfo);
+
+	return testcard_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_test_card_info(TEST_CARD_INFO* testcard_table, char* start_pos)
+Description:初始化测试卡表
+Input:char* start_pos, 共享内存中的起始位置
+Output:TEST_CARD_INFO* test_card_info，指向测试卡表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_test_card_info(TEST_CARD_INFO* testcard_table, char* start_pos)
+{
+	char sql_str[512];
+	TestCardInfo l_testcard;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(testcard_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	testcard_table->testCardInfo = (TestCardInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(msisdn), trim(deal_flag),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by msisdn", TESTCARD_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_testcard CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_testcard;
+
+	for(i = 0; i < testcard_table->record_count; i++)
+	{
+		memset(&l_testcard, 0, sizeof(TestCardInfo));
+		EXEC SQL FETCH cur_testcard INTO :l_testcard.msisdn, :l_testcard.deal_flag, :l_testcard.begin_date, :l_testcard.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((testcard_table->testCardInfo)[i].msisdn,l_testcard.msisdn);
+		strtrim((testcard_table->testCardInfo)[i].deal_flag,l_testcard.deal_flag);
+		strtrim((testcard_table->testCardInfo)[i].begin_date,l_testcard.begin_date);
+		strtrim((testcard_table->testCardInfo)[i].end_date,l_testcard.end_date);
+
+	}
+	EXEC SQL CLOSE cur_testcard;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_intertsp_size(INTER_TSP* intertsp_table)
+Description:	获取国际运营商代码表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_intertsp_size(INTER_TSP* intertsp_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by tsp_imsi desc", INTERTSP_TABLE);
+
+	/*初始化intertsp_tablee*/
+	memset(intertsp_table, 0, sizeof(INTER_TSP));
+	intertsp_table->record_count = get_record_count(sql_tail);
+	intertsp_table->space_size = intertsp_table->record_count*sizeof(InterTsp);
+
+	return intertsp_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_inter_tsp(INTER_TSP* inter_tsp, char* start_pos)
+Description:国际运营商代码表�
+Input:char* start_pos, 共享内存中的起始位置
+Output:INTER_TSP* inter_tsp，指向国际运营商代码表本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_inter_tsp(INTER_TSP* intertsp_table, char* start_pos)
+{
+	char sql_str[512];
+	InterTsp l_intertsp;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(intertsp_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	intertsp_table->interTsp = (InterTsp*)start_pos;
+
+	sprintf(sql_str,"select	trim(inter_number), trim(tsp_imsi),\
+			trim(msc_code),\
+			svr_status,\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS'),\
+			time_type\
+		 	from %s order by tsp_imsi desc", INTERTSP_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_inter CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_inter;
+
+	for(i = 0; i < intertsp_table->record_count; i++)
+	{
+		memset(&l_intertsp, 0, sizeof(InterTsp));
+		EXEC SQL FETCH cur_inter INTO :l_intertsp.inter_number, :l_intertsp.tsp_imsi,\
+			:l_intertsp.msc_code, :l_intertsp.svr_status, :l_intertsp.begin_date, :l_intertsp.end_date,	:l_intertsp.time_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((intertsp_table->interTsp)[i].inter_number,l_intertsp.inter_number);
+		strtrim((intertsp_table->interTsp)[i].tsp_imsi,l_intertsp.tsp_imsi);
+		strtrim((intertsp_table->interTsp)[i].msc_code,l_intertsp.msc_code);
+		(intertsp_table->interTsp)[i].svr_status=l_intertsp.svr_status;
+		strtrim((intertsp_table->interTsp)[i].begin_date,l_intertsp.begin_date);
+		strtrim((intertsp_table->interTsp)[i].end_date,l_intertsp.end_date);
+		(intertsp_table->interTsp)[i].time_type=l_intertsp.time_type;
+
+	}
+	EXEC SQL CLOSE cur_inter;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_chinamsc_size(CHINA_MSC* chinamsc_table)
+Description:	获取标准交换机表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_chinamsc_size(CHINA_MSC* chinamsc_table)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by msc_code", CHINAMSC_TABLE);
+
+	/*初始化chinamsc_table*/
+	memset(chinamsc_table, 0, sizeof(CHINA_MSC));
+	chinamsc_table->record_count = get_record_count(sql_tail);
+	chinamsc_table->space_size = chinamsc_table->record_count*sizeof(ChinaMsc);
+
+	return chinamsc_table->space_size;
+}
+
+/********************************************************** 
+Function:int init_china_msc(CHINA_MSC* chinamsc_table, char* start_pos)
+Description:初始化标准交换机代码表�
+Input:char* start_pos, 共享内存中的起始位置
+Output:CHINA_MSC* china_msc，指向标准交换机代码表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_china_msc(CHINA_MSC* chinamsc_table, char* start_pos)
+{
+	char sql_str[512];
+	ChinaMsc l_china;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(chinamsc_table->record_count == 0)
+		return 0;
+		
+	/*获得局数据的起始地址*/
+	chinamsc_table->chinaMsc = (ChinaMsc*)start_pos;
+
+	sprintf(sql_str,"select	trim(msc_code), trim(long_code),trim(multi_flag),\
+			to_char(change_date,'YYYYMMDDHH24MISS'),\
+			trim(long_code_new),trim(multi_flag_new),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS'),\
+			time_type\
+		 	from %s order by msc_code", CHINAMSC_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_china CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_china;
+
+	for(i = 0; i < chinamsc_table->record_count; i++)
+	{
+		memset(&l_china, 0, sizeof(ChinaMsc));
+		EXEC SQL FETCH cur_china INTO :l_china.msc_code, :l_china.long_code, :l_china.multi_flag, :l_china.change_date, \
+			:l_china.long_code_new, :l_china.multi_flag_new, :l_china.begin_date, :l_china.end_date, :l_china.time_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((chinamsc_table->chinaMsc)[i].msc_code,l_china.msc_code);
+		strtrim((chinamsc_table->chinaMsc)[i].long_code,l_china.long_code);
+		strtrim((chinamsc_table->chinaMsc)[i].change_date,l_china.change_date);
+		strtrim((chinamsc_table->chinaMsc)[i].long_code_new,l_china.long_code_new);
+		strtrim((chinamsc_table->chinaMsc)[i].begin_date,l_china.begin_date);
+		strtrim((chinamsc_table->chinaMsc)[i].end_date,l_china.end_date);
+		(chinamsc_table->chinaMsc)[i].multi_flag = l_china.multi_flag;
+		(chinamsc_table->chinaMsc)[i].multi_flag_new = l_china.multi_flag_new;
+		(chinamsc_table->chinaMsc)[i].time_type=l_china.time_type;
+
+		chinamsc_table->mscCluster[atoi((chinamsc_table->chinaMsc)[i].msc_code + 4)]= chinamsc_table->chinaMsc + i;
+	}
+	EXEC SQL CLOSE cur_china;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_preview_size(PREVIEW_INFO* preview_info)
+Description:	获取预演号码表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_preview_size(PREVIEW_INFO* preview_info)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by msisdn", PREVIEW_TABLE);
+
+	/*初始化preview_info*/
+	memset(preview_info, 0, sizeof(PREVIEW_INFO));
+	preview_info->record_count = get_record_count(sql_tail);
+	preview_info->space_size = preview_info->record_count*sizeof(PreviewInfo);
+
+	return preview_info->space_size;
+}
+
+/********************************************************** 
+Function:int init_preview_info(PREVIEW_INFO* preview_table, char* start_pos)
+Description:初始化预演号码表�
+Input:char* start_pos, 共享内存中的起始位置
+Output:PREVIEW_INFO* preview_info，指向预演号码表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_preview_info(PREVIEW_INFO* preview_table, char* start_pos)
+{
+	char sql_str[512];
+	PreviewInfo l_preview;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(preview_table->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	preview_table->previewInfo = (PreviewInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(system_type), trim(msisdn),\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS')\
+		 	from %s order by msisdn", PREVIEW_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_preview CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_preview;
+
+	for(i = 0; i < preview_table->record_count; i++)
+	{
+		memset(&l_preview, 0, sizeof(PreviewInfo));
+		EXEC SQL FETCH cur_preview INTO :l_preview.system_type,:l_preview.msisdn,:l_preview.begin_date,  :l_preview.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((preview_table->previewInfo)[i].system_type,l_preview.system_type);
+		strtrim((preview_table->previewInfo)[i].msisdn,l_preview.msisdn);
+		strtrim((preview_table->previewInfo)[i].begin_date,l_preview.begin_date);
+		strtrim((preview_table->previewInfo)[i].end_date,l_preview.end_date);
+	}
+	EXEC SQL CLOSE cur_preview;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int get_router_size(VPMN_ROUTER_INFO* router_info)
+Description:	获取集团路由表的记录数和占用的空间
+Input:			无
+Output:			无
+Return: 		int 非负 占用的空间（单位字节）, -1表示出错
+Others:			
+**********************************************************/
+int get_router_size(VPMN_ROUTER_INFO* router_info)
+{
+	char sql_tail[256];
+
+	sprintf(sql_tail, " %s order by vpmn_code", ROUTER_TABLE);
+
+	/*初始化router_info*/
+	memset(router_info, 0, sizeof(VPMN_ROUTER_INFO));
+	router_info->record_count = get_record_count(sql_tail);
+	router_info->space_size = router_info->record_count*sizeof(VpmnRouterInfo);
+
+	return router_info->space_size;
+}
+
+/********************************************************** 
+Function:int init_vpmn_router(VPMN_ROUTER_INFO* router_info, char* start_pos)
+Description:初始化集团路由表�
+Input:char* start_pos, 共享内存中的起始位置
+Output:VPMN_ROUTER_INFO* router_info，指向集团路由表的本地指针
+Return:int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_vpmn_router(VPMN_ROUTER_INFO* router_info, char* start_pos)
+{
+	char sql_str[512];
+	VpmnRouterInfo l_router;
+	int i;
+
+	/*进行记录数为0的判断处理*/
+	if(router_info->record_count == 0)
+		return 0;
+
+	/*获得局数据的起始地址*/
+	router_info->vpmnRouterInfo = (VpmnRouterInfo*)start_pos;
+
+	sprintf(sql_str,"select	trim(vpmn_code), trim(ip_address),server_port, to_char(change_date,'YYYYMMDDHH24MISS'),\
+			trim(ip_address_new),server_port_new,to_char(begin_date,'YYYYMMDDHH24MISS'), \
+			to_char(end_date  ,'YYYYMMDDHH24MISS') from %s order by vpmn_code", ROUTER_TABLE);
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_router CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_router;
+
+	for(i = 0; i < router_info->record_count; i++)
+	{
+		memset(&l_router, 0, sizeof(VpmnRouterInfo));
+		EXEC SQL FETCH cur_router INTO :l_router.vpmn_code,:l_router.ip_address,:l_router.server_port, :l_router.change_date,
+			:l_router.ip_address_new,:l_router.server_port_new,:l_router.begin_date, :l_router.end_date;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((router_info->vpmnRouterInfo)[i].vpmn_code,l_router.vpmn_code);
+		strtrim((router_info->vpmnRouterInfo)[i].ip_address,l_router.ip_address);
+		strtrim((router_info->vpmnRouterInfo)[i].change_date,l_router.change_date);
+		strtrim((router_info->vpmnRouterInfo)[i].ip_address_new,l_router.ip_address_new);
+		strcpy((router_info->vpmnRouterInfo)[i].begin_date, l_router.begin_date);
+		strcpy((router_info->vpmnRouterInfo)[i].end_date, l_router.end_date);
+		(router_info->vpmnRouterInfo)[i].server_port = l_router.server_port;
+		(router_info->vpmnRouterInfo)[i].server_port_new = l_router.server_port_new;
+	}
+	EXEC SQL CLOSE cur_router;
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int clean_communal_data(CommunalData* cdata)
+Description:	清除共享内存
+Input:			CommunalData* cdate，指向局数据绑定结构的指针
+Output:			无
+Return: 		int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int clean_communal_data(CommunalData* cdata)
+{
+	/*释放内存*/
+	if(cdata->start_pos != NULL)
+	{
+		int i;
+		CHAT_TYPE_INFO* ctinfo = &(cdata->chat_type_info);
+
+		/*释放正则表达式*/
+		if(ctinfo->chatTypeInfo!=NULL)
+		{
+			for(i=0; i<ctinfo->record_count; i++)
+			{
+				regfree(&((ctinfo->chatTypeInfo)[i].regex));
+			}
+		}
+		
+		#ifdef SHARED_MEMORY_MODEL
+       	shmctl(cdata->shmid, IPC_RMID, NULL);
+		#else
+		free(cdata->start_pos);
+		#endif
+		cdata->start_pos = NULL;
+	}
+
+	return 0;
+}
+
+/********************************************************** 
+Function:		int init_communal_data(CommunalData* cdate, const char* k_path)
+Description:	初始化局数据
+Input:			CommunalData* cdate，指向局数据绑定结构的指针
+				const char* k_path, 文件系统路径
+Output:			无
+Return: 		int 0 成功, -1表示出错
+Others:			
+**********************************************************/
+int init_communal_data(CommunalData* cdata, const char* k_path)
+{
+	pid_t pid = getpid();
+	int total_size = 0;
+	key_t ipc_key;
+	
+	/*获得各局数据占用空间的大小*/
+	total_size += get_h1h2h3_size(&(cdata->h1h2h3_code_allocate));
+	total_size += get_city_size(&(cdata->city_list));
+	total_size += get_country_size(&(cdata->country_long_code));
+	total_size += get_feerate_size(&(cdata->fee_rate_base));	
+	total_size += get_intertsp_size(&(cdata->inter_tsp));	
+	total_size += get_rent_size(&(cdata->rent_h1h2h3));	
+	total_size += get_msclac_size(&(cdata->msc_lac_code));
+	total_size += get_lachome_size(&(cdata->lac_home_code));
+	total_size += get_duration_size(&(cdata->duration_type));	
+	total_size += get_boundary_size(&(cdata->boundary_roam));	
+	total_size += get_area_size(&(cdata->area_code_info));
+	total_size += get_area_snd_size(&(cdata->area_code_snd));
+	total_size += get_spcode_size(&(cdata->sp_code_info));
+	total_size += get_spoper_size(&(cdata->sp_oper_code));
+	
+	total_size += get_dial_size(&(cdata->dial_type_info));	
+	total_size += get_chat_size(&(cdata->chat_type_info));
+	total_size += get_pstnchat_size(&(cdata->pstn_chat_type));
+	total_size += get_datecode_size(&(cdata->date_code_info));	
+	total_size += get_feeind_size(&(cdata->fee_plan_index));	
+	total_size += get_ifeeind_size(&(cdata->ifee_plan_index));	
+	total_size += get_feeplan_size(&(cdata->cfee_plan_info),CFEEPLAN_TABLE);	
+	total_size += get_feeplan_size(&(cdata->lfee_plan_info),LFEEPLAN_TABLE);	
+	total_size += get_feeplan_size(&(cdata->ifee_plan_info), IFEEPLAN_TABLE);	
+	total_size += get_infonum_size(&(cdata->info_number_table));	
+	
+	total_size += get_smstype_size(&(cdata->sms_type_info));	
+	total_size += get_datafee_size(&(cdata->data_cfee_plan), DATACFEE_TABLE);
+	total_size += get_datafee_size(&(cdata->data_ofee_plan), DATAOFEE_TABLE);
+	total_size += get_account_size(&(cdata->account_id_info));	
+	total_size += get_favind_size(&(cdata->fav_index));	
+	total_size += get_datesnd_size(&(cdata->date_code_snd));	
+	total_size += get_location_size(&(cdata->location_code_info));	
+	total_size += get_vpmncode_size(&(cdata->vpmn_code_info));	
+	total_size += get_voicefav_size(&(cdata->voicefav_cfee_plan), FAV_CFEE_TABLE);
+	total_size += get_voicefav_size(&(cdata->voicefav_lfee_plan), FAV_LFEE_TABLE);
+	
+	total_size += get_datafav_size(&(cdata->datafav_fee_plan));	
+	total_size += get_freerate_size(&(cdata->free_rate_base));	
+	total_size += get_vpmnphone_size(&(cdata->vpmn_phone_prefix));	
+	/*total_size += get_testcard_size(&(cdata->test_card_info));*/	
+	total_size += get_chinamsc_size(&(cdata->china_msc));	
+	total_size += get_preview_size(&(cdata->preview_info));
+	total_size += get_router_size(&(cdata->vpmn_router_info));
+
+	printf("The total size of configure data is [%d] KByte\n", total_size/1024);
+	
+	#ifdef SHARED_MEMORY_MODEL
+	printf("Allotting SYSTEM V Shared Memory .......... ");
+	
+	/*获取key_t健*/
+	ipc_key = ftok(k_path, pid);
+
+	/*分配共享内存区*/
+	if((cdata->shmid = shmget(ipc_key, total_size, OFLAGS)) < 0)
+	{
+		printf("Init SYSTEM V Shared Memory Error!\n");
+		return -1;
+	}
+
+	/*挂接共享内存到当前进程空间*/
+	if((cdata->start_pos = (char *)shmat(cdata->shmid, NULL, 0)) == NULL)
+	{
+		printf("Mapping shared memory Error!\n");
+		return -1;
+	}
+
+	printf("OK\n");
+	#else
+	printf("Allotting Dynamic Memory .......... ");
+
+	/*分配动态内存空间*/
+	if((cdata->start_pos = (char *)calloc(total_size, sizeof(char))) == NULL )
+	{
+		printf("Error!\n");
+		return -1;
+	}
+
+	printf("OK\n");
+	#endif
+
+	total_size = 0;
+	
+	printf("Init h1h2h3_code_allocate ........");
+	if(init_h1h2h3_code_allocate(&(cdata->h1h2h3_code_allocate), cdata->start_pos + total_size))
+	{
+		printf(" Error!\n");
+		return -1;
+	}
+	printf(" OK!\n");
+	total_size += (cdata->h1h2h3_code_allocate).space_size;
+
+	printf("Init city_list ........");
+	if( init_city_list(&(cdata->city_list), cdata->start_pos + total_size) <  0 )
+    {
+		printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->city_list).space_size;
+
+	printf("Init country_long_code ........");
+	if(init_country_long_code(&(cdata->country_long_code), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->country_long_code).space_size;
+	
+	printf("Init fee_rate_base ........");
+	if(init_fee_rate_base(&(cdata->fee_rate_base), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->fee_rate_base).space_size;
+	
+	printf("Init inter_tsp ........");
+	if(init_inter_tsp(&(cdata->inter_tsp), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->inter_tsp).space_size;
+	
+	printf("Init rent_h1h2h3 ........");
+	if(init_rent_h1h2h3(&(cdata->rent_h1h2h3), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->rent_h1h2h3).space_size;
+	
+	printf("Init msc_lac_code ........");
+	if(init_msc_lac_code(&(cdata->msc_lac_code), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->msc_lac_code).space_size;
+
+	printf("Init lac_home_code ........");
+	if(init_lac_home_code(&(cdata->lac_home_code), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->lac_home_code).space_size;
+
+	printf("Init duration_type ........");
+	if(init_duration_type(&(cdata->duration_type), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->duration_type).space_size;
+	
+	printf("Init boundary_roam ........");
+	if(init_boundary_roam(&(cdata->boundary_roam), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->boundary_roam).space_size;
+	
+	printf("Init area_code_info ........");
+	if(init_area_code_info(&(cdata->area_code_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->area_code_info).space_size;
+
+	printf("Init area_code_snd ........");
+	if(init_area_code_snd(&(cdata->area_code_snd), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->area_code_snd).space_size;
+
+	printf("Init sp_code_info ........");
+	if(init_sp_code_info(&(cdata->sp_code_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->sp_code_info).space_size;
+
+	printf("Init sp_oper_code ........");
+	if(init_sp_oper_code(&(cdata->sp_oper_code), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->sp_oper_code).space_size;
+
+	printf("Init dial_type_info ........");
+	if(init_dial_type_info(&(cdata->dial_type_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->dial_type_info).space_size;
+	
+	printf("Init chat_type_info ........");
+	if(init_chat_type_info(&(cdata->chat_type_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->chat_type_info).space_size;
+
+	printf("Init pstn_chat_type ........");
+	if(init_pstn_chat_type(&(cdata->pstn_chat_type), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->pstn_chat_type).space_size;
+	
+	printf("Init date_code_info ........");
+	if(init_date_code_info(&(cdata->date_code_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->date_code_info).space_size;
+	
+	printf("Init fee_plan_index ........");
+	if(init_fee_plan_index(&(cdata->fee_plan_index), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->fee_plan_index).space_size;
+	
+	printf("Init ifee_plan_index ........");
+	if(init_ifee_plan_index(&(cdata->ifee_plan_index), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->ifee_plan_index).space_size;
+	
+	printf("Init cfee_plan_info ........");
+	if(init_fee_plan_info(&(cdata->cfee_plan_info), CFEEPLAN_TABLE, cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->cfee_plan_info).space_size;
+	
+	printf("Init lfee_plan_info ........");
+	if(init_fee_plan_info(&(cdata->lfee_plan_info), LFEEPLAN_TABLE, cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->lfee_plan_info).space_size;
+	
+	printf("Init ifee_plan_info ........");
+	if(init_fee_plan_info(&(cdata->ifee_plan_info), IFEEPLAN_TABLE, cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->ifee_plan_info).space_size;
+	
+	printf("Init info_number_table ........");
+	if(init_info_number_table(&(cdata->info_number_table), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->info_number_table).space_size;
+	
+	printf("Init sms_type_info ........");
+	if(init_sms_type_info(&(cdata->sms_type_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->sms_type_info).space_size;
+	
+	printf("Init data_cfee_plan ........");
+	if(init_data_fee_plan(&(cdata->data_cfee_plan), cdata->start_pos + total_size, DATACFEE_TABLE)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->data_cfee_plan).space_size;
+	
+	printf("Init data_ofee_plan ........");
+	if(init_data_fee_plan(&(cdata->data_ofee_plan), cdata->start_pos + total_size, DATAOFEE_TABLE)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->data_ofee_plan).space_size;
+	
+	printf("Init account_id_info ........");
+	if(init_account_id_info(&(cdata->account_id_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->account_id_info).space_size;
+	
+	printf("Init fav_index ........");
+	if(init_fav_index(&(cdata->fav_index), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->fav_index).space_size;
+	
+	printf("Init date_code_snd ........");
+	if(init_date_code_snd(&(cdata->date_code_snd), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->date_code_snd).space_size;
+	
+	printf("Init location_code_info ........");
+	if(init_location_code_info(&(cdata->location_code_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->location_code_info).space_size;
+	
+	printf("Init vpmn_code_info ........");
+	if(init_vpmn_code_info(&(cdata->vpmn_code_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->vpmn_code_info).space_size;
+	
+	printf("Init voicefav_cfee_plan ........");
+	if(init_voicefav_fee_plan(&(cdata->voicefav_cfee_plan), cdata->start_pos + total_size, FAV_CFEE_TABLE)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->voicefav_cfee_plan).space_size;
+	
+	printf("Init voicefav_lfee_plan ........");
+	if(init_voicefav_fee_plan(&(cdata->voicefav_lfee_plan), cdata->start_pos + total_size, FAV_LFEE_TABLE)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->voicefav_lfee_plan).space_size;
+	
+	printf("Init datafav_fee_plan ........");
+	if(init_datafav_fee_plan(&(cdata->datafav_fee_plan), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->datafav_fee_plan).space_size;
+	
+	printf("Init free_rate_base ........");
+	if(init_free_rate_base(&(cdata->free_rate_base), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->free_rate_base).space_size;
+	
+	printf("Init vpmn_phone_prefix ........");
+	if(init_vpmn_phone_prefix(&(cdata->vpmn_phone_prefix), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->vpmn_phone_prefix).space_size;
+	
+	/*printf("Init test_card_info ........");
+	if(init_test_card_info(&(cdata->test_card_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->test_card_info).space_size;*/
+	
+	printf("Init china_msc ........");
+	if(init_china_msc(&(cdata->china_msc), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->china_msc).space_size;
+	
+	printf("Init preview_info ........");
+	if(init_preview_info(&(cdata->preview_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->preview_info).space_size;
+
+	printf("Init vpmn_router_info ........");
+	if(init_vpmn_router(&(cdata->vpmn_router_info), cdata->start_pos + total_size)<0)
+    {
+       	printf(" Error!\n");
+       	return -1;
+    }
+    printf(" OK!\n");
+	total_size += (cdata->vpmn_router_info).space_size;
+
+	return 0;
+}

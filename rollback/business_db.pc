@@ -1,0 +1,170 @@
+/*
+Copyright (C), 1995-2005, Si-Tech Information Technology Ltd. 
+file_name:	business_db.pc
+author:		caoshun
+version:	1.00
+date:		2005-05-10
+description:
+			数据库操作函数
+others:
+history:
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+EXEC SQL INCLUDE sqlca;
+EXEC SQL INCLUDE oraca;
+EXEC ORACLE OPTION (ORACA=YES);
+
+#include "billing_roll.h"
+
+#include "mydefine.h"
+#include "CookieFunc.h"
+#include "ErrLog.h"
+#include "function.h"
+#include "database.h"
+#include "business.h"
+#include "business_db.h"
+
+/*外部全局变量引用*/
+
+/* 系统数据 */
+extern struct stApp_Data g_AppData;
+/* 日志对象 */
+extern struct stErrLog g_RunLog;
+/* Billing数据库 */
+extern struct stDB_DBInfo g_BillingDB;
+/*RollFile模式下用的数据结构*/
+extern struct stApp_RollFileMode g_AppRollFileMode;
+/* 数据库对象 */
+extern struct stDB_DBInfo g_BillingDB;
+
+/* 格式化数据库错误信息 */
+#define DB_SQLERR_SPRINTF {*(sqlca.sqlerrm.sqlerrmc+sqlca.sqlerrm.sqlerrml-1) = '\0'; sprintf(g_RunLog.LogBuffer, "DB:ERR:num[%d],msg[%s]", sqlca.sqlcode, sqlca.sqlerrm.sqlerrmc);}
+
+
+/*
+function:   busi_db_GetRouteControlTable()
+description:
+		取RouteControlTable表里数据
+Input:      
+Output:
+		0:成功，other:不成功
+Return:     
+others: 
+*/
+int busi_db_GetRouteControlTable(void)
+{
+	int iLoopCount;
+	int iRouteGroup;
+	char chSqlBuffer[4096+1];
+
+	char route_name[11+1];
+	char route_group[8+1];
+	char new_route_group[8+1];
+	char change_date[14+1];
+
+	/* 生成查询SQL语句 */
+	MEMSET(chSqlBuffer);
+
+	sprintf
+	(
+		chSqlBuffer, 
+		"SELECT route_name, route_group, change_date, route_group_new FROM route_control_table WHERE route_name like '13%%' ORDER BY route_name"
+	);
+
+#ifdef DEBUG
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:%s", chSqlBuffer);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+#endif	
+
+	/* 生成查询游标 */
+	EXEC SQL AT :g_BillingDB.server_id PREPARE ora_pre FROM :chSqlBuffer;
+	EXEC SQL AT :g_BillingDB.server_id DECLARE ora_cur_obj CURSOR FOR ora_pre;
+	EXEC SQL AT :g_BillingDB.server_id OPEN ora_cur_obj;
+	g_BillingDB.sqlcode = SQLCODE;
+	if(SQLCODE)
+	{
+		DB_SQLERR_SPRINTF;
+		BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+		return -1;
+	}
+
+	iLoopCount = 0;
+	
+	/* 处理所有的数据记录 */
+	for(;;)
+	{	
+		EXEC SQL AT :g_BillingDB.server_id
+		FETCH
+			ora_cur_obj
+		INTO
+			:route_name,
+			:route_group,
+			:change_date,
+			:new_route_group
+		;
+		g_BillingDB.sqlcode = SQLCODE;
+		if(SQLCODE)
+		{
+			if(SQLCODE == DB_SQLCODE_NO_DATA_FOUND)
+			{
+				/* 处理完所有的数据记录 */
+				break;
+			}
+			else
+			{
+				DB_SQLERR_SPRINTF;
+				BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+				EXEC SQL AT :g_BillingDB.server_id CLOSE ora_cur_obj;
+				return -1;
+			}
+		}
+		
+		cf_string_trim(route_name);
+		cf_string_trim(route_group);
+		cf_string_trim(change_date);
+		cf_string_trim(new_route_group);
+
+		if(strlen(route_name) != 7)
+		{
+			BUSI_WRITE_RUNLOG(ERROR_APP_9999);
+			return -1;
+		}
+
+		if(strcmp(g_AppData.chRunDate, change_date) >= 0)
+		{
+			iRouteGroup = atoi(new_route_group);
+		}
+		else
+		{
+			iRouteGroup = atoi(route_group);			
+		}
+
+		g_AppData.iRouteControl_H1H2H3H4[atoi(route_name+2)] = iRouteGroup;		
+
+		/*求文件分发最大分支数*/
+		if(iRouteGroup > g_AppRollFileMode.iProcessPathNumber)
+		{
+			g_AppRollFileMode.iProcessPathNumber = iRouteGroup;
+		}
+		
+		iLoopCount++;
+	}
+
+	/* 关闭查询游标 */
+	EXEC SQL AT :g_BillingDB.server_id CLOSE ora_cur_obj;
+
+	/* 生成处理报告统计信息 */
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:表RouteControlTable总记录数=%d", iLoopCount);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);
+
+	sprintf(g_RunLog.LogBuffer, "APP:MSG:文件分发最大编号=%d", g_AppRollFileMode.iProcessPathNumber);
+	BUSI_WRITE_RUNLOG(g_RunLog.LogBuffer);	
+
+	return 0;
+	
+}

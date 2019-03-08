@@ -1,0 +1,523 @@
+/*
+Copyright (C), 1995-2004, Si-Tech Information Technology Ltd. 
+file_name:	business_db.pc
+author:		caoshun
+version:	1.01
+date:		2004-12-24
+description:
+			与业务有关的数据库操作函数-代码文件
+others:
+			此文件的内容是参照批价程序相关代码，具体内容请查看批价程序
+history:
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+EXEC SQL INCLUDE sqlca;
+EXEC SQL INCLUDE oraca;
+EXEC ORACLE OPTION (ORACA=YES);
+
+#include "billing_qfav.h"
+#include "business.h"
+#include "business_db.h"
+
+/* 本地全局变量 */
+struct  FAV_INDEX g_stFavIndex[FAV_INDEX_SUFFIX];
+struct  FAV_CFEE g_stFavCfee[FAV_CFEE_SUFFIX];
+struct  FAV_LFEE g_stFavLfee[FAV_LFEE_SUFFIX];
+struct  FAV_DATA g_stFavData[FAV_DATA_SUFFIX];
+struct  FAV_FREE g_stFavFree[FAV_FREE_SUFFIX];
+struct  FAV_FEERATEBASE g_stFavFeeRateBase[FAV_FEERATEBASE_SUFFIX];
+
+/* 外部全局变量 */
+extern struct stApp_Dict g_AppDict;
+
+int busi_db_get_favindex(void)
+{
+	char sql_str[512];
+	struct FAV_INDEX l_favind;
+	int i;
+
+	i = 0;
+	
+	/*进行记录数为0的判断处理*/
+	/*
+	if(favind_table->record_count == 0)
+		return 0;
+	*/
+		
+	/*获得局数据的起始地址*/
+	/*
+	favind_table->favIndex = (FavIndex*)start_pos;
+	*/
+
+	sprintf(sql_str,"select	trim(fav_type), fav_class, fav_level, trim(fav_plan),\
+			trim(affect_service),discount_order,\
+			to_char(begin_date,'YYYYMMDDHH24MISS'),\
+			to_char(end_date  ,'YYYYMMDDHH24MISS'),time_type\
+		 	from %s where query_type='1' order by fav_type", "fav_index");
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_favind CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_favind;
+
+	for(;;)
+	{
+		memset(&l_favind, 0, sizeof(struct FAV_INDEX));
+		
+		EXEC SQL FETCH cur_favind INTO :l_favind.fav_type, :l_favind.fav_class, :l_favind.fav_level,:l_favind.fav_plan, :l_favind.affect_service, \
+			:l_favind.discount_order, :l_favind.begin_date, :l_favind.end_date, :l_favind.time_type;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((g_stFavIndex)[i].fav_type,l_favind.fav_type);
+		strtrim((g_stFavIndex)[i].affect_service,l_favind.affect_service);
+		strtrim((g_stFavIndex)[i].fav_plan,l_favind.fav_plan);
+		(g_stFavIndex)[i].fav_class = l_favind.fav_class;
+		(g_stFavIndex)[i].fav_level = l_favind.fav_level;
+		(g_stFavIndex)[i].discount_order=l_favind.discount_order;
+		strtrim((g_stFavIndex)[i].begin_date,l_favind.begin_date);
+		strtrim((g_stFavIndex)[i].end_date,l_favind.end_date);
+		(g_stFavIndex)[i].time_type = l_favind.time_type;
+
+		i++;
+
+		if(i >= FAV_INDEX_SUFFIX)
+		{
+			BUSI_WRITE_RUNLOG(ERROR_APP_1001);
+			return -1;
+		}
+	}
+	
+	EXEC SQL CLOSE cur_favind;
+
+	g_AppDict.iFavIndexCount = i;
+
+	return 0;
+}
+
+int busi_db_get_favcfee(void)
+{
+	char sql_str[512];
+	struct FAV_CFEE l_voice;
+	int i;
+
+	i = 0;
+
+	/*进行记录数为0的判断处理*/
+	/*
+	if(voicefav_table->record_count == 0)
+		return 0;
+	*/
+
+	/*获得局数据的起始地址*/
+	/*
+	voicefav_table->voicefavFeePlan = (VoicefavFeePlan*)start_pos;
+	*/
+
+	sprintf(sql_str,"select	trim(fav_plan),trim(system_types),trim(user_brands),\
+				trim(other_brands), trim(area_codes),\
+				trim(location_codes),trim(vpmn_codes),\
+				trim(relation_codes),trim(date_codes),\
+				trim(call_types), trim(roam_types),\
+				trim(dial_types), trim(chat_types),\
+				trim(fee_types),  trim(user_types),\
+				min_value,discount_rate,\
+				trim(free_type),trim(free_index),\
+				trim(relation_index),trim(free_plan),\
+				trim(deal_type),trim(rate_plan)\
+		 		from %s order by fav_plan, roam_types, free_index desc", "voicefav_cfee_plan");
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_voice CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_voice;
+
+	for(;;)
+	{
+		memset(&l_voice, 0, sizeof(struct FAV_CFEE));
+		
+		EXEC SQL FETCH cur_voice INTO :l_voice.fav_plan, :l_voice.system_types, :l_voice.user_brands, :l_voice.other_brands, 
+			:l_voice.area_codes, :l_voice.location_codes, :l_voice.vpmn_codes,	:l_voice.relation_codes,  
+			:l_voice.date_codes, :l_voice.call_types, :l_voice.roam_types, :l_voice.dial_types,	:l_voice.chat_types, 
+			:l_voice.fee_types,	:l_voice.user_types, :l_voice.min_value, :l_voice.discount_rate, :l_voice.free_type, 
+			:l_voice.free_index, :l_voice.relation_index, :l_voice.free_plan, :l_voice.deal_type, :l_voice.rate_plan;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((g_stFavCfee)[i].fav_plan,l_voice.fav_plan);
+		strtrim((g_stFavCfee)[i].system_types,l_voice.system_types);
+		strtrim((g_stFavCfee)[i].user_brands,l_voice.user_brands);
+		strtrim((g_stFavCfee)[i].other_brands,l_voice.other_brands);
+		strtrim((g_stFavCfee)[i].area_codes,l_voice.area_codes);
+		strtrim((g_stFavCfee)[i].location_codes,l_voice.location_codes);
+		strtrim((g_stFavCfee)[i].vpmn_codes,l_voice.vpmn_codes);
+		strtrim((g_stFavCfee)[i].relation_codes,l_voice.relation_codes);
+		strtrim((g_stFavCfee)[i].date_codes,l_voice.date_codes);
+		strtrim((g_stFavCfee)[i].call_types,l_voice.call_types);
+		strtrim((g_stFavCfee)[i].roam_types,l_voice.roam_types);
+		strtrim((g_stFavCfee)[i].dial_types,l_voice.dial_types);
+		strtrim((g_stFavCfee)[i].chat_types,l_voice.chat_types);
+		strtrim((g_stFavCfee)[i].fee_types,l_voice.fee_types);
+		strtrim((g_stFavCfee)[i].user_types,l_voice.user_types);
+		
+		(g_stFavCfee)[i].min_value=l_voice.min_value;
+		(g_stFavCfee)[i].discount_rate=l_voice.discount_rate;
+		strtrim((g_stFavCfee)[i].free_type,l_voice.free_type);
+		strtrim((g_stFavCfee)[i].free_index,l_voice.free_index);
+		strtrim((g_stFavCfee)[i].relation_index,l_voice.relation_index);
+		strtrim((g_stFavCfee)[i].free_plan,l_voice.free_plan);
+		strtrim((g_stFavCfee)[i].deal_type,l_voice.deal_type);
+		strtrim((g_stFavCfee)[i].rate_plan,l_voice.rate_plan);
+
+		i++;
+
+		if(i >= FAV_CFEE_SUFFIX)
+		{
+			BUSI_WRITE_RUNLOG(ERROR_APP_1002);
+			return -1;
+		}
+	}
+	EXEC SQL CLOSE cur_voice;
+
+	g_AppDict.iFavCfeeCount = i;
+
+	return 0;
+}
+
+int busi_db_get_favlfee(void)
+{
+	char sql_str[512];
+	struct FAV_LFEE l_voice;
+	int i;
+
+	i = 0;
+
+	/*进行记录数为0的判断处理*/
+	/*
+	if(voicefav_table->record_count == 0)
+		return 0;
+	*/
+
+	/*获得局数据的起始地址*/
+	/*
+	voicefav_table->voicefavFeePlan = (VoicefavFeePlan*)start_pos;
+	*/
+
+	sprintf(sql_str,"select	trim(fav_plan),trim(system_types),trim(user_brands),\
+				trim(other_brands), trim(area_codes),\
+				trim(location_codes),trim(vpmn_codes),\
+				trim(relation_codes),trim(date_codes),\
+				trim(call_types), trim(roam_types),\
+				trim(dial_types), trim(chat_types),\
+				trim(fee_types),  trim(user_types),\
+				min_value,discount_rate,\
+				trim(free_type),trim(free_index),\
+				trim(relation_index),trim(free_plan),\
+				trim(deal_type),trim(rate_plan)\
+		 		from %s order by fav_plan, roam_types, free_index desc", "voicefav_lfee_plan");
+
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_voice1 CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_voice1;
+
+	for(;;)
+	{
+		memset(&l_voice, 0, sizeof(struct FAV_LFEE));
+		
+		EXEC SQL FETCH cur_voice INTO :l_voice.fav_plan, :l_voice.system_types,:l_voice.user_brands, :l_voice.other_brands, 
+			:l_voice.area_codes, :l_voice.location_codes, :l_voice.vpmn_codes,	:l_voice.relation_codes,  
+			:l_voice.date_codes, :l_voice.call_types, :l_voice.roam_types, :l_voice.dial_types,	:l_voice.chat_types, 
+			:l_voice.fee_types,	:l_voice.user_types, :l_voice.min_value, :l_voice.discount_rate, :l_voice.free_type, 
+			:l_voice.free_index, :l_voice.relation_index, :l_voice.free_plan, :l_voice.deal_type, :l_voice.rate_plan;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((g_stFavLfee)[i].fav_plan,l_voice.fav_plan);
+		strtrim((g_stFavLfee)[i].system_types,l_voice.system_types);
+		strtrim((g_stFavLfee)[i].user_brands,l_voice.user_brands);
+		strtrim((g_stFavLfee)[i].other_brands,l_voice.other_brands);
+		strtrim((g_stFavLfee)[i].area_codes,l_voice.area_codes);
+		strtrim((g_stFavLfee)[i].location_codes,l_voice.location_codes);
+		strtrim((g_stFavLfee)[i].vpmn_codes,l_voice.vpmn_codes);
+		strtrim((g_stFavLfee)[i].relation_codes,l_voice.relation_codes);
+		strtrim((g_stFavLfee)[i].date_codes,l_voice.date_codes);
+		strtrim((g_stFavLfee)[i].call_types,l_voice.call_types);
+		strtrim((g_stFavLfee)[i].roam_types,l_voice.roam_types);
+		strtrim((g_stFavLfee)[i].dial_types,l_voice.dial_types);
+		strtrim((g_stFavLfee)[i].chat_types,l_voice.chat_types);
+		strtrim((g_stFavLfee)[i].fee_types,l_voice.fee_types);
+		strtrim((g_stFavLfee)[i].user_types,l_voice.user_types);
+		
+		(g_stFavLfee)[i].min_value=l_voice.min_value;
+		(g_stFavLfee)[i].discount_rate=l_voice.discount_rate;
+		strtrim((g_stFavLfee)[i].free_type,l_voice.free_type);
+		strtrim((g_stFavLfee)[i].free_index,l_voice.free_index);
+		strtrim((g_stFavLfee)[i].relation_index,l_voice.relation_index);
+		strtrim((g_stFavLfee)[i].free_plan,l_voice.free_plan);
+		strtrim((g_stFavLfee)[i].deal_type,l_voice.deal_type);
+		strtrim((g_stFavLfee)[i].rate_plan,l_voice.rate_plan);
+
+		i++;
+
+		if(i >= FAV_LFEE_SUFFIX)
+		{
+			BUSI_WRITE_RUNLOG(ERROR_APP_1003);
+			return -1;
+		}
+	}
+	EXEC SQL CLOSE cur_voice1;
+
+	g_AppDict.iFavLfeeCount = i;
+
+	return 0;
+
+}
+
+int busi_db_get_favdata(void)
+{
+	char sql_str[512];
+	struct FAV_DATA l_datafav;
+	int i;
+
+	i = 0;
+
+	/*进行记录数为0的判断处理*/
+	/*
+	if(datafav_table->record_count == 0)
+		return 0;
+	*/
+		
+	/*获得局数据的起始地址*/
+	/*
+	datafav_table->datafavFeePlan = (DatafavFeePlan*)start_pos;
+	*/
+
+	sprintf(sql_str,"select	trim(fav_plan),trim(system_type),trim(user_brands),\
+			 trim(other_brands), trim(vpmn_codes),\
+			 trim(relation_codes), trim(date_codes),\
+			 trim(add_conditions), trim(user_types ),\
+			 min_value,discount_rate,\
+			 trim(free_type), trim(free_index),\
+			 trim(relation_index),trim(free_plan),\
+			 trim(deal_type),trim(rate_plan)\
+		 	 from %s order by fav_plan, free_index desc", "datafav_fee_plan");
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_datafav CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_datafav;
+
+	for(;;)
+	{
+		memset(&l_datafav, 0, sizeof(struct FAV_DATA));
+		
+		EXEC SQL FETCH cur_datafav INTO :l_datafav.fav_plan, :l_datafav.system_type, :l_datafav.user_brands, :l_datafav.other_brands, 
+			:l_datafav.vpmn_codes, :l_datafav.relation_codes, :l_datafav.date_codes, :l_datafav.add_conditions,	
+			:l_datafav.user_types, :l_datafav.min_value, :l_datafav.discount_rate, :l_datafav.free_type, 
+			:l_datafav.free_index, :l_datafav.relation_index, :l_datafav.free_plan, :l_datafav.deal_type, :l_datafav.rate_plan;
+
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((g_stFavData)[i].fav_plan,l_datafav.fav_plan);
+		strtrim((g_stFavData)[i].system_type,l_datafav.system_type);
+		strtrim((g_stFavData)[i].user_brands,l_datafav.user_brands);
+		strtrim((g_stFavData)[i].other_brands,l_datafav.other_brands);
+		strtrim((g_stFavData)[i].vpmn_codes,l_datafav.vpmn_codes);
+		strtrim((g_stFavData)[i].relation_codes,l_datafav.relation_codes);
+		strtrim((g_stFavData)[i].date_codes,l_datafav.date_codes);
+		strtrim((g_stFavData)[i].add_conditions,l_datafav.add_conditions);
+		strtrim((g_stFavData)[i].user_types,l_datafav.user_types);
+		(g_stFavData)[i].min_value=l_datafav.min_value;
+		(g_stFavData)[i].discount_rate=l_datafav.discount_rate;
+		strtrim((g_stFavData)[i].free_type,l_datafav.free_type);
+		strtrim((g_stFavData)[i].free_index,l_datafav.free_index);
+		strtrim((g_stFavData)[i].relation_index,l_datafav.relation_index);
+		strtrim((g_stFavData)[i].free_plan,l_datafav.free_plan);
+		strtrim((g_stFavData)[i].deal_type,l_datafav.deal_type);
+		strtrim((g_stFavData)[i].rate_plan,l_datafav.rate_plan);
+
+		i++;
+
+		if(i >= FAV_DATA_SUFFIX)
+		{
+			BUSI_WRITE_RUNLOG(ERROR_APP_1004);
+			return -1;
+		}
+	}
+	EXEC SQL CLOSE cur_datafav;
+
+	g_AppDict.iFavDataCount = i;
+
+	return 0;
+
+}
+
+int busi_db_get_favfree(void)
+{
+	char sql_str[512];
+	struct FAV_FREE l_freerate;
+	int i;
+
+	i = 0;
+	/*进行记录数为0的判断处理*/
+	/*
+	if(freerate_table->record_count == 0)
+		return 0;
+	*/
+
+	/*获得局数据的起始地址*/
+	/*
+	freerate_table->freeRateBase = (FreeRateBase*)start_pos;
+	*/
+
+	sprintf(sql_str,"select	trim(free_plan), start_value,\
+			end_value,free_unit, free_modulus, \
+			free_value,to_char(change_date,'YYYYMMDDHH24MISS'),\
+			free_value_new\
+		 	from %s order by free_plan", "free_rate_base");
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_freerate CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_freerate;
+
+	for(;;)
+	{
+		memset(&l_freerate, 0, sizeof(struct FAV_FREE));
+		
+		EXEC SQL FETCH cur_freerate INTO :l_freerate.free_plan, :l_freerate.start_value, :l_freerate.end_value, :l_freerate.free_unit, :l_freerate.free_modulus, \
+			:l_freerate.free_value, :l_freerate.change_date, :l_freerate.free_value_new;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		strtrim((g_stFavFree)[i].free_plan,l_freerate.free_plan);
+		(g_stFavFree)[i].start_value=l_freerate.start_value;
+		(g_stFavFree)[i].end_value=l_freerate.end_value;
+		(g_stFavFree)[i].free_unit=l_freerate.free_unit;
+		(g_stFavFree)[i].free_modulus=l_freerate.free_modulus;
+		(g_stFavFree)[i].free_value=l_freerate.free_value;
+		strtrim((g_stFavFree)[i].change_date,l_freerate.change_date);
+		(g_stFavFree)[i].free_value_new=l_freerate.free_value_new;
+
+		i++;
+
+		if(i >= FAV_FREE_SUFFIX)
+		{
+			BUSI_WRITE_RUNLOG(ERROR_APP_1005);
+			return -1;
+		}
+	}
+	EXEC SQL CLOSE cur_freerate;
+
+	g_AppDict.iFavFreeCount = i;
+
+	return 0;
+}
+
+int busi_db_get_favfeeratebase(void)
+{
+	char sql_str[512];
+	struct FAV_FEERATEBASE l_feerate;
+	int i;
+
+	i = 0;
+	/*进行记录数为0的判断处理*/
+	/*
+	if(get_feerate_size(feerate_table) == 0)
+		return 0;
+	*/
+		
+	/*获得局数据的起始地址*/
+	/*
+	if(NULL ==(feerate_table->feeRateBase = (FeeRateBase*)calloc(feerate_table->record_count, sizeof(FeeRateBase))))
+		return -1;
+	*/
+
+	sprintf(sql_str,"select trim(rate_plan),trim(begin_time),\
+				trim(end_time),begin_value,\
+		        end_value, rate_unit,fee_rate,\
+			    to_char(change_date,'YYYYMMDDHH24MISS'),\
+				rate_unit_new, fee_rate_new\
+		 		from %s order by rate_plan,begin_time,begin_value", "fee_rate_base");
+
+	EXEC SQL PREPARE dynamicsql FROM :sql_str;
+	EXEC SQL DECLARE cur_feerate CURSOR FOR dynamicsql;
+	EXEC SQL OPEN cur_feerate;
+
+	for(;;)
+	{
+		memset(&l_feerate, 0, sizeof(struct FAV_FEERATEBASE));
+		
+		EXEC SQL FETCH cur_feerate INTO :l_feerate.rate_plan, :l_feerate.begin_time, :l_feerate.end_time, \
+			:l_feerate.begin_value,  :l_feerate.end_value, :l_feerate.rate_unit, :l_feerate.fee_rate,  \
+			:l_feerate.change_date,  :l_feerate.rate_unit_new, :l_feerate.fee_rate_new;
+
+		if (sqlca.sqlcode == 1403) break;
+
+		/*
+		char_delete(l_feerate.begin_time, ':');
+		char_delete(l_feerate.end_time, ':');
+		*/
+
+		strtrim((g_stFavFeeRateBase)[i].rate_plan,l_feerate.rate_plan);
+		strtrim((g_stFavFeeRateBase)[i].begin_time,l_feerate.begin_time);
+		strtrim((g_stFavFeeRateBase)[i].end_time,l_feerate.end_time);
+		(g_stFavFeeRateBase)[i].begin_value=l_feerate.begin_value;
+		(g_stFavFeeRateBase)[i].end_value=l_feerate.end_value;
+		(g_stFavFeeRateBase)[i].rate_unit=l_feerate.rate_unit;
+		(g_stFavFeeRateBase)[i].fee_rate=l_feerate.fee_rate;
+		strcpy((g_stFavFeeRateBase)[i].change_date,l_feerate.change_date);
+		(g_stFavFeeRateBase)[i].rate_unit_new=l_feerate.rate_unit_new;
+		(g_stFavFeeRateBase)[i].fee_rate_new=l_feerate.fee_rate_new;
+
+		i++;
+
+		if(i >= FAV_FEERATEBASE_SUFFIX)
+		{
+			BUSI_WRITE_RUNLOG(ERROR_APP_1007);
+			return -1;
+		}		
+
+	}
+	EXEC SQL CLOSE cur_feerate;
+
+	g_AppDict.iFavFeeRateBaseCount = i;
+
+	return 0;
+}
+
+
+int strtrim(char* target,const char* source)
+{
+    int i=0, size=strlen(source);
+	char *tmp;
+
+	if(source==NULL||size<1)
+		return 0;
+
+	tmp=calloc(1,size+2);
+		
+	for(i=0;i<size;i++)
+	{
+	    if(!isspace((int)source[i]))
+			break;
+	}
+
+	strncpy(tmp,&source[i],size-i);
+    
+	
+	for(i=(strlen(tmp)-1);i>=0;i--)
+	{
+	    if(!isspace((int)tmp[i]))
+			break;
+	}
+
+	snprintf(target,i+2,"%s",tmp);
+	
+	free(tmp);
+    
+	return strlen(target);
+}
